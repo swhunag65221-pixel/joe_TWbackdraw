@@ -207,6 +207,24 @@ python3 -m tw_backdraw backtest --csv data/taiex.csv --max-bars 25 --repair 0.60
 
 所有參數集中在 [`tw_backdraw/config.py`](tw_backdraw/config.py)。
 
+### 美股版：S&P 500 → UPRO（3x）
+
+```bash
+.venv/bin/python scripts/fetch_finlab.py --us                       # ^GSPC + UPRO
+.venv/bin/python scripts/finlab_report.py --market us --preset us_tuned --stats
+```
+
+| | CAGR | 總報酬 | 最大回檔 | Sharpe | Calmar |
+|---|---|---|---|---|---|
+| **策略 `us_tuned`（UPRO）** | **20.8%** | 627.2% | **−37.5%** | **0.88** | **0.55** |
+| 買進持有 UPRO | 29.2% | 1413.4% | −76.8% | 0.75 | 0.38 |
+| 買進持有 SPY | 13.5% | 282.8% | −34.1% | 0.80 | 0.40 |
+
+兩個市場的形狀一致：**CAGR 輸給買進持有槓桿 ETF，但最大回檔砍半、Sharpe 與
+Calmar 較佳**。但美股資料只有 10.6 年、8 筆交易，且樣本外驗證顯示台股採用的
+「報酬÷回檔」選擇標準**在美股沒有複製成功**。完整討論見
+[docs/strategy.md §12](docs/strategy.md)。
+
 ---
 
 ## 專案結構
