@@ -151,6 +151,16 @@ python3 -m tw_backdraw status --csv data/taiex.csv --etf-csv data/00631L.csv --c
 
 `scripts/current_plan.py --capital 1000000` 會一次印出完整計畫加上這份現況。
 
+### Colab notebook（不用 clone repo）
+
+[`notebooks/tw50_2x_finlab.ipynb`](notebooks/tw50_2x_finlab.ipynb) 是可直接上傳到
+Colab 執行的完整回測，由上而下跑完即可，只需要 FinLab API token。
+策略程式碼是從 `tw_backdraw/` 的原始碼**嵌入**的（不是另寫的簡化版），
+內容涵蓋：取資料 → 跑策略 → `sim()` → `report.display()` → 逐筆對齊驗證 →
+與買進持有對照 → 目前部位現況 → 參數敏感度。
+
+改了 `tw_backdraw/` 之後用 `python3 scripts/make_notebook.py` 重新產生。
+
 ### 用 FinLab `sim()` 產生互動報表
 
 ```python
@@ -245,9 +255,11 @@ scripts/
   fetch_finlab.py  FinLab 日線抓取（主要）
   fetch_twse.py    證交所日線抓取（備援，不需帳號）
   current_plan.py  印出目前這一輪的計畫與現況
+  make_notebook.py Colab notebook 產生器（嵌入 tw_backdraw 原始碼）
   grid_search.py   648,000 組參數搜尋 + 邊際分析
   walk_forward.py  前半段選參數、後半段驗收的樣本外測試
   finlab_report.py FinLab sim() 回測，供 report.display() 使用
+notebooks/         Colab 用的 .ipynb
 docs/strategy.md   完整策略說明
 tests/             單元測試
 ```
