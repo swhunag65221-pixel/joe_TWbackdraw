@@ -40,9 +40,12 @@ CRITERIA = {
 }
 
 
-def _init(bars):
-    global _BARS
-    _BARS = bars
+_BASE = None
+
+
+def _init(bars, base=None):
+    global _BARS, _BASE
+    _BARS, _BASE = bars, base
 
 
 def _key(p: dict) -> tuple:
