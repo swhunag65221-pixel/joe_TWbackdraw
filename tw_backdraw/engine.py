@@ -125,6 +125,20 @@ def breakout_stop(cfg: StrategyConfig, prior_high: float, peak_since_breakout: f
     raise ValueError(f"未知的 exit_mode: {mode!r}")
 
 
+def ladder_weights(cfg: StrategyConfig, target: float) -> list[tuple[float, float]]:
+    """回檔加碼梯的實際權重。
+
+    底倉與加碼梯合計必須剛好等於目標水位：加碼梯的設定值是「彼此之間的比例」，
+    實際可用的額度是 1 − base_weight。少了這一步，base_weight=1.0 會在滿倉之後
+    再加 60%，把部位推到目標的 160%，直接突破風險預算。
+    """
+    remaining = max(0.0, 1.0 - cfg.entry.base_weight)
+    total = sum(w for _, w in cfg.entry.pullback_ladder)
+    if remaining <= 0 or total <= 0:
+        return []
+    return [(thr, w / total * remaining * target) for thr, w in cfg.entry.pullback_ladder]
+
+
 def _risk_scale(entry_index: float, fill_index: float, levels: Levels,
                 cfg: StrategyConfig) -> float:
     """往上加碼時的權重縮放。
@@ -212,7 +226,7 @@ class Engine:
                     swing_high = bar.close
                     peak_since_breakout = 0.0
                     derisked = reloaded = took_profit = False
-                    unfilled = [(thr, w * target) for thr, w in cfg.entry.pullback_ladder]
+                    unfilled = ladder_weights(cfg, target)
                     pending.append(("buy", cfg.entry.base_weight * target, "底倉：訊號確認，不等回檔"))
             else:
                 lv, c = trade.levels, bar.close

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .config import DEFAULT_CONFIG, StrategyConfig
-from .engine import position_size
+from .engine import ladder_weights, position_size
 from .levels import Levels, build_levels
 
 
@@ -83,9 +83,9 @@ def build_plan(peak: float, trough: float, reference_index: float,
 
     orders = [Order(tag="底倉", weight=cfg.entry.base_weight * target,
                     trigger="訊號確認後次一交易日市價買進，不等回檔", index_level=None)]
-    for thr, w in cfg.entry.pullback_ladder:
+    for thr, w in ladder_weights(cfg, target):
         orders.append(
-            Order(tag=f"回檔 -{thr:.0%}", weight=w * target,
+            Order(tag=f"回檔 -{thr:.0%}", weight=w,
                   trigger=f"自訊號後波段最高收盤回檔 {thr:.0%} 且收盤仍在 {lv.half_line_with_buffer:,.0f} 之上",
                   index_level=reference_index * (1 - thr))
         )

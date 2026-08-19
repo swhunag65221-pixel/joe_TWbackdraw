@@ -12,11 +12,18 @@ from tw_backdraw import build_levels, build_plan, detect_setups
 from tw_backdraw.setup import scan_episodes
 from tw_backdraw.bars import Bar
 from tw_backdraw.config import (
-    DEFAULT_CONFIG, PRESETS, ExitConfig, SetupConfig, StrategyConfig,
+    DEFAULT_CONFIG, POST_CONFIG, PRESETS, EntryConfig, ExitConfig, SetupConfig,
+    StrategyConfig,
 )
-from tw_backdraw.engine import Engine, breakout_stop, moving_average, position_size
+from tw_backdraw.engine import (
+    Engine, breakout_stop, ladder_weights, moving_average, position_size,
+)
 from tw_backdraw.leveraged import synth_leveraged_path
 from tw_backdraw.status import render_status
+
+# 下列多數測試驗的是「貼文版」的規則語意（分批加碼梯、38.2% 警戒線、15 日修復），
+# 所以一律釘在 POST_CONFIG，不隨專案預設值改變而漂移。
+POST = POST_CONFIG
 
 # 貼文中的台股實例
 PEAK, TROUGH = 47742.0, 39933.0
@@ -40,7 +47,7 @@ def ramp(a: float, b: float, n: int) -> list[float]:
 
 class TestLevels(unittest.TestCase):
     def test_matches_post_numbers(self):
-        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
+        lv = build_levels(PEAK, TROUGH, POST.levels)
         self.assertAlmostEqual(lv.drop, 7809.0)
         self.assertAlmostEqual(lv.drop_pct, 0.1636, places=4)
         # 貼文說「補回一半」那條線大約在 43800
@@ -50,7 +57,7 @@ class TestLevels(unittest.TestCase):
         self.assertEqual(lv.invalidation, TROUGH)
 
     def test_zones(self):
-        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
+        lv = build_levels(PEAK, TROUGH, POST.levels)
         self.assertEqual(lv.zone(48000), "breakout")
         self.assertEqual(lv.zone(46000), "healthy")
         self.assertEqual(lv.zone(43700), "buffer")       # 主防線下方 0.5% 內
@@ -59,7 +66,7 @@ class TestLevels(unittest.TestCase):
         self.assertEqual(lv.zone(39000), "invalidated")
 
     def test_repair_fraction(self):
-        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
+        lv = build_levels(PEAK, TROUGH, POST.levels)
         self.assertAlmostEqual(lv.repair_fraction(TROUGH), 0.0)
         self.assertAlmostEqual(lv.repair_fraction(PEAK), 1.0)
         self.assertAlmostEqual(lv.repair_fraction(lv.half_line), 0.5)
@@ -69,7 +76,7 @@ class TestSetupDetection(unittest.TestCase):
     def test_fast_repair_triggers(self):
         # 47742 → 39933（下跌），12 根 K 補回 80%
         closes = [PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, TROUGH + 0.80 * 7809, 12)
-        setups = detect_setups(series(closes), DEFAULT_CONFIG.setup)
+        setups = detect_setups(series(closes), POST.setup)
         self.assertEqual(len(setups), 1)
         s = setups[0]
         self.assertAlmostEqual(s.peak, PEAK)
@@ -80,13 +87,13 @@ class TestSetupDetection(unittest.TestCase):
     def test_slow_repair_rejected(self):
         # 同樣補回八成，但拖了 40 根 K —— 歷史成功率只剩五成，不進場
         closes = [PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, TROUGH + 0.80 * 7809, 40)
-        self.assertEqual(detect_setups(series(closes), DEFAULT_CONFIG.setup), [])
+        self.assertEqual(detect_setups(series(closes), POST.setup), [])
 
     def test_shallow_dip_rejected(self):
         # 只回檔 6%，不到 10% 門檻
         low = PEAK * 0.94
         closes = [PEAK] + ramp(PEAK, low, 10) + ramp(low, PEAK * 0.99, 6)
-        self.assertEqual(detect_setups(series(closes), DEFAULT_CONFIG.setup), [])
+        self.assertEqual(detect_setups(series(closes), POST.setup), [])
 
     def test_lower_low_resets_the_clock(self):
         # 先反彈一半、再破底，計時必須從新谷底重算
@@ -94,7 +101,7 @@ class TestSetupDetection(unittest.TestCase):
         deeper = TROUGH - 800
         closes = ([PEAK] + ramp(PEAK, TROUGH, 15) + ramp(TROUGH, mid, 8)
                   + ramp(mid, deeper, 8) + ramp(deeper, deeper + 0.8 * (PEAK - deeper), 10))
-        setups = detect_setups(series(closes), DEFAULT_CONFIG.setup)
+        setups = detect_setups(series(closes), POST.setup)
         self.assertEqual(len(setups), 1)
         self.assertAlmostEqual(setups[0].trough, deeper)
 
@@ -116,7 +123,7 @@ class TestReanchor(unittest.TestCase):
         return [10000.0] + ramp(10000, deep, 30) + slow + dip + rebound
 
     def test_reanchored_low_level_setup_is_detected(self):
-        setups = detect_setups(series(self._series()), DEFAULT_CONFIG.setup)
+        setups = detect_setups(series(self._series()), POST.setup)
         self.assertEqual(len(setups), 1, [s.describe() for s in setups])
         # 訊號的參考高點是改錨後的新高，不是 10000 那個舊高
         self.assertLess(setups[0].peak, 7000)
@@ -126,42 +133,77 @@ class TestReanchor(unittest.TestCase):
         self.assertEqual(detect_setups(series(self._series()), cfg), [])
 
     def test_episodes_explain_every_rejection(self):
-        eps = scan_episodes(series(self._series()), DEFAULT_CONFIG.setup)
+        eps = scan_episodes(series(self._series()), POST.setup)
         self.assertGreaterEqual(len(eps), 2)
         slow = eps[0]
         self.assertFalse(slow.fired)
-        self.assertLess(slow.best_in_window, DEFAULT_CONFIG.setup.repair_fraction)
-        self.assertIn("只補回", slow.reason(DEFAULT_CONFIG.setup))
+        self.assertLess(slow.best_in_window, POST.setup.repair_fraction)
+        self.assertIn("只補回", slow.reason(POST.setup))
         self.assertTrue(eps[-1].fired)
 
     def test_episodes_and_setups_agree(self):
         bars = series(self._series())
-        fired = [e for e in scan_episodes(bars, DEFAULT_CONFIG.setup) if e.fired]
-        self.assertEqual(len(fired), len(detect_setups(bars, DEFAULT_CONFIG.setup)))
+        fired = [e for e in scan_episodes(bars, POST.setup) if e.fired]
+        self.assertEqual(len(fired), len(detect_setups(bars, POST.setup)))
+
+
+class TestLadderNormalisation(unittest.TestCase):
+    """底倉加上回檔加碼梯，必須剛好等於目標水位，不能超額。"""
+
+    def _cfg(self, base_weight: float):
+        return StrategyConfig(setup=POST.setup, levels=POST.levels,
+                              entry=EntryConfig(base_weight=base_weight),
+                              exit=POST.exit, sizing=POST.sizing, cost=POST.cost)
+
+    def test_base_plus_ladder_always_equals_the_target(self):
+        for bw in (0.0, 0.25, 0.4, 0.75, 1.0):
+            with self.subTest(base_weight=bw):
+                cfg = self._cfg(bw)
+                total = bw + sum(w for _, w in ladder_weights(cfg, 1.0))
+                self.assertAlmostEqual(total, 1.0, places=9)
+
+    def test_full_base_leaves_no_ladder(self):
+        self.assertEqual(ladder_weights(self._cfg(1.0), 1.0), [])
+
+    def test_post_preset_ladder_is_unchanged(self):
+        self.assertEqual([round(w, 6) for _, w in ladder_weights(POST, 1.0)], [0.3, 0.3])
+
+    def test_engine_never_exceeds_the_target_weight(self):
+        base = TROUGH + 0.80 * 7809
+        # 訊號後連續下殺，把兩段加碼梯都觸發
+        closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
+                  + [base * 0.965, base * 0.945, base * 0.95, base * 0.96])
+        for bw in (0.4, 1.0):
+            with self.subTest(base_weight=bw):
+                cfg = self._cfg(bw)
+                bars = series(closes)
+                etf = synth_leveraged_path(bars, cfg.cost, cfg.sizing.leverage)
+                t = Engine(cfg).run(bars, etf).trades[0]
+                self.assertLessEqual(t.filled_weight, t.target_weight + 1e-9)
 
 
 class TestSizing(unittest.TestCase):
     def test_further_stop_means_smaller_position(self):
-        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
-        near = position_size(44000, lv, DEFAULT_CONFIG)   # 離失效線近
-        far = position_size(47000, lv, DEFAULT_CONFIG)    # 離失效線遠
+        lv = build_levels(PEAK, TROUGH, POST.levels)
+        near = position_size(44000, lv, POST)   # 離失效線近
+        far = position_size(47000, lv, POST)    # 離失效線遠
         self.assertGreater(near, far)
-        self.assertLessEqual(far, DEFAULT_CONFIG.sizing.max_weight)
+        self.assertLessEqual(far, POST.sizing.max_weight)
 
     def test_risk_budget_is_respected(self):
-        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
+        lv = build_levels(PEAK, TROUGH, POST.levels)
         entry = 46200.0
-        w = position_size(entry, lv, DEFAULT_CONFIG)
+        w = position_size(entry, lv, POST)
         # 兩段式停損全部走完的預期損失 ≈ 風險預算
         to_warn = (entry - lv.warn_line) / entry
         to_trough = (entry - lv.invalidation) / entry
         loss = w * 2.0 * (0.5 * to_warn + 0.5 * to_trough)
-        self.assertAlmostEqual(loss, DEFAULT_CONFIG.sizing.risk_per_trade, places=6)
+        self.assertAlmostEqual(loss, POST.sizing.risk_per_trade, places=6)
 
 
 class TestEngine(unittest.TestCase):
     def _run(self, closes: list[float], cfg: StrategyConfig | None = None):
-        cfg = cfg or DEFAULT_CONFIG
+        cfg = cfg or POST
         bars = series(closes)
         etf = synth_leveraged_path(bars, cfg.cost, cfg.sizing.leverage)
         return bars, Engine(cfg).run(bars, etf)
@@ -225,10 +267,10 @@ class TestEngine(unittest.TestCase):
         self.assertGreater(t.ret, 0.0)
 
     def test_take_profit_at_prior_high_when_enabled(self):
-        cfg = StrategyConfig(setup=DEFAULT_CONFIG.setup, levels=DEFAULT_CONFIG.levels,
-                             entry=DEFAULT_CONFIG.entry,
+        cfg = StrategyConfig(setup=POST.setup, levels=POST.levels,
+                             entry=POST.entry,
                              exit=ExitConfig(target_take_fraction=1 / 3),
-                             sizing=DEFAULT_CONFIG.sizing, cost=DEFAULT_CONFIG.cost)
+                             sizing=POST.sizing, cost=POST.cost)
         _, res = self._run(self._breakout_series(), cfg)
         sells = [f.reason for f in res.trades[0].fills if f.side == "sell"]
         self.assertTrue(any("目標達陣" in r for r in sells), sells)
@@ -247,7 +289,7 @@ class TestEngine(unittest.TestCase):
 
     def test_derisk_then_reload_when_the_main_line_is_reclaimed(self):
         base = TROUGH + 0.80 * 7809
-        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
+        lv = build_levels(PEAK, TROUGH, POST.levels)
         # 跌破 38.2% 警戒線 → 減碼；再收復 50% 主防線 → 回補一次
         closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
                   + ramp(base, lv.warn_line - 200, 10)
@@ -259,7 +301,7 @@ class TestEngine(unittest.TestCase):
 
     def test_no_adds_below_the_main_line(self):
         base = TROUGH + 0.80 * 7809
-        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
+        lv = build_levels(PEAK, TROUGH, POST.levels)
         # 直接摜破主防線（−5% 以上），但 caution 區不得加碼
         closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
                   + [lv.half_line - 300] * 5)
@@ -275,15 +317,25 @@ class TestEngine(unittest.TestCase):
 
     def test_faster_repair_threshold_is_configurable(self):
         closes = [PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, TROUGH + 0.80 * 7809, 30)
-        strict = DEFAULT_CONFIG.setup
+        strict = POST.setup
         loose = SetupConfig(min_drawdown=0.10, repair_fraction=0.75, max_repair_bars=35)
         self.assertEqual(detect_setups(series(closes), strict), [])
         self.assertEqual(len(detect_setups(series(closes), loose)), 1)
 
 
 class TestPresets(unittest.TestCase):
-    def test_default_is_the_post_faithful_preset(self):
-        self.assertEqual(PRESETS["post"], DEFAULT_CONFIG)
+    def test_default_is_the_calmar_tuned_preset(self):
+        """專案預設是以「總報酬 ÷ 最大回檔」選出的那一組。"""
+        self.assertEqual(DEFAULT_CONFIG, PRESETS["tuned"])
+        self.assertNotEqual(DEFAULT_CONFIG, PRESETS["post"])
+
+    def test_post_preset_still_matches_the_article(self):
+        cfg = PRESETS["post"]
+        self.assertEqual(cfg.setup.max_repair_bars, 15)
+        self.assertAlmostEqual(cfg.setup.repair_fraction, 0.75)
+        self.assertAlmostEqual(cfg.levels.warn_line_ratio, 0.382)
+        self.assertAlmostEqual(cfg.entry.base_weight, 0.40)
+        self.assertAlmostEqual(cfg.exit.warn_derisk_fraction, 0.50)
 
     def test_every_preset_runs(self):
         base = TROUGH + 0.80 * 7809
@@ -315,12 +367,12 @@ class TestPresets(unittest.TestCase):
 
 class TestPlan(unittest.TestCase):
     def test_plan_weights_sum_to_target(self):
-        plan = build_plan(PEAK, TROUGH, 46200, DEFAULT_CONFIG, capital=1_000_000)
+        plan = build_plan(PEAK, TROUGH, 46200, POST, capital=1_000_000)
         total = sum(o.weight for o in plan.orders)
         self.assertAlmostEqual(total, plan.target_weight, places=6)
 
     def test_render_contains_the_key_levels(self):
-        text = build_plan(PEAK, TROUGH, 46200, DEFAULT_CONFIG).render()
+        text = build_plan(PEAK, TROUGH, 46200, POST).render()
         for token in ("47,742", "43,838", "42,916", "39,933"):
             self.assertIn(token, text)
 
@@ -334,9 +386,9 @@ class TestMovingAverageExit(unittest.TestCase):
         self.assertAlmostEqual(ma[3], 30.0)
 
     def _cfg(self, **kw):
-        return StrategyConfig(setup=DEFAULT_CONFIG.setup, levels=DEFAULT_CONFIG.levels,
-                              entry=DEFAULT_CONFIG.entry, exit=ExitConfig(**kw),
-                              sizing=DEFAULT_CONFIG.sizing, cost=DEFAULT_CONFIG.cost)
+        return StrategyConfig(setup=POST.setup, levels=POST.levels,
+                              entry=POST.entry, exit=ExitConfig(**kw),
+                              sizing=POST.sizing, cost=POST.cost)
 
     def test_ratchet_uses_prior_high_until_the_ma_catches_up(self):
         cfg = self._cfg(exit_mode="ma_ratchet", ma_period=20)
@@ -387,9 +439,9 @@ class TestStatus(unittest.TestCase):
         base = TROUGH + 0.80 * 7809
         closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12) + [base * 0.99] * 3)
         bars = series(closes)
-        etf = synth_leveraged_path(bars, DEFAULT_CONFIG.cost, 2.0)
-        res = Engine(DEFAULT_CONFIG).run(bars, etf)
-        text = render_status(res, bars, DEFAULT_CONFIG, capital=1_000_000)
+        etf = synth_leveraged_path(bars, POST.cost, 2.0)
+        res = Engine(POST).run(bars, etf)
+        text = render_status(res, bars, POST, capital=1_000_000)
         self.assertIn("底倉", text)
         self.assertIn("42,916", text)      # 警戒線
         self.assertIn("39,933", text)      # 失效線
@@ -397,17 +449,17 @@ class TestStatus(unittest.TestCase):
 
     def test_status_without_a_position(self):
         bars = series([PEAK * (1 + 0.001 * i) for i in range(30)])
-        etf = synth_leveraged_path(bars, DEFAULT_CONFIG.cost, 2.0)
-        res = Engine(DEFAULT_CONFIG).run(bars, etf)
-        text = render_status(res, bars, DEFAULT_CONFIG)
+        etf = synth_leveraged_path(bars, POST.cost, 2.0)
+        res = Engine(POST).run(bars, etf)
+        text = render_status(res, bars, POST)
         self.assertIn("沒有進行中的部位", text)
 
 
 class TestLeveraged(unittest.TestCase):
     def test_two_x_on_a_single_day(self):
         bars = series([100.0, 105.0])
-        path = synth_leveraged_path(bars, DEFAULT_CONFIG.cost, 2.0, start_price=100.0)
-        self.assertAlmostEqual(path[1] / path[0] - 1, 0.10 - DEFAULT_CONFIG.cost.daily_carry, places=6)
+        path = synth_leveraged_path(bars, POST.cost, 2.0, start_price=100.0)
+        self.assertAlmostEqual(path[1] / path[0] - 1, 0.10 - POST.cost.daily_carry, places=6)
 
     def test_choppy_market_decays(self):
         # 指數來回震盪回到原點，槓桿 ETF 必然虧損
@@ -415,7 +467,7 @@ class TestLeveraged(unittest.TestCase):
         for _ in range(30):
             closes += [closes[-1] * 1.03, closes[-1] * 1.03 / 1.03]
         bars = series(closes)
-        path = synth_leveraged_path(bars, DEFAULT_CONFIG.cost, 2.0)
+        path = synth_leveraged_path(bars, POST.cost, 2.0)
         self.assertAlmostEqual(bars[-1].close, 100.0, places=6)
         self.assertLess(path[-1], 100.0)
 

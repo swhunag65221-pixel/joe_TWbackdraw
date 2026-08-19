@@ -22,7 +22,7 @@ from .status import render_status
 
 
 def _config_from_args(args: argparse.Namespace) -> StrategyConfig:
-    cfg = PRESETS.get(getattr(args, "preset", None) or "post", DEFAULT_CONFIG)
+    cfg = PRESETS.get(getattr(args, "preset", None) or "tuned", DEFAULT_CONFIG)
     setup = SetupConfig(
         min_drawdown=getattr(args, "min_drawdown", None) or cfg.setup.min_drawdown,
         repair_fraction=getattr(args, "repair", None) or cfg.setup.repair_fraction,
@@ -128,8 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--risk", type=float, help="單筆風險預算，預設 0.08")
     common.add_argument("--base-weight", type=float, help="底倉佔目標部位比例，預設 0.40")
     common.add_argument("--preset", choices=sorted(PRESETS),
-                        help="參數預設組：post（貼文原意，預設）/ tuned（報酬最佳）"
-                             "/ balanced（調校訊號 + MA40 出場）/ winrate（勝率最高，無停損）")
+                        help="參數預設組：tuned（總報酬最佳，預設）/ post（貼文原意）"
+                             "/ balanced（tuned + MA40 出場）/ winrate（勝率最高，無停損）")
 
     sp = sub.add_parser("plan", parents=[common], help="產生操作計畫")
     sp.add_argument("--peak", type=float, required=True, help="前波高點")
