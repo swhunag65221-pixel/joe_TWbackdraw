@@ -248,8 +248,10 @@ class Engine:
                 elif zone == "warning" and not derisked:
                     unfilled = []
                     derisked = True
+                    verb = "清倉" if cfg.exit.warn_derisk_fraction >= 1.0 else "減碼"
                     pending.append(("sell", cfg.exit.warn_derisk_fraction,
-                                    f"警戒減碼：收盤跌破 {lv.warn_line:,.0f}（38.2% 回補位）"))
+                                    f"警戒{verb}：收盤跌破 {lv.warn_line:,.0f}"
+                                    f"（{cfg.levels.warn_line_ratio:.1%} 回補位）"))
 
                 else:
                     adds_allowed = zone in ("healthy", "buffer", "breakout")

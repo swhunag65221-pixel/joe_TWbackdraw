@@ -12,7 +12,7 @@
 
 資料集：
     taiex_total_index:{開盤,最高,最低,收盤}指數   加權指數 OHLC，1999-01-05 起
-    price:{開盤,最高,最低,收盤}價                 全上市櫃個股/ETF，00631L 自 2014-10-31 起
+    etl:adj_{open,high,low,close}                 全上市櫃個股/ETF 還原股價，00631L 自 2014-10-31 起
 
 註：`taiex_total_index` 的名稱容易誤會，實際內容是**發行量加權股價指數**（價格指數，
     非報酬指數），已與證交所 MI_5MINS_HIST 逐筆核對相符。含息的報酬指數是
@@ -35,7 +35,15 @@ TAIEX_FIELDS = {
     "low": "taiex_total_index:最低指數",
     "close": "taiex_total_index:收盤指數",
 }
+# 一律使用還原股價。00631L 於 2026-03-31 做過約 23:1 的分割，
+# 未還原的 price:收盤價 會在那天出現 -95.7% 的假單日報酬，回測必然失真。
 STOCK_FIELDS = {
+    "open": "etl:adj_open",
+    "high": "etl:adj_high",
+    "low": "etl:adj_low",
+    "close": "etl:adj_close",
+}
+RAW_STOCK_FIELDS = {
     "open": "price:開盤價",
     "high": "price:最高價",
     "low": "price:最低價",
@@ -82,12 +90,13 @@ def fetch_taiex(out: Path) -> None:
     write_csv(pd.DataFrame(cols), out)
 
 
-def fetch_etf(symbol: str, out: Path) -> None:
+def fetch_etf(symbol: str, out: Path, raw: bool = False) -> None:
     import pandas as pd
     from finlab import data
 
-    print(f"抓取 {symbol} OHLC …")
-    frames = {k: data.get(ds) for k, ds in STOCK_FIELDS.items()}
+    fields = RAW_STOCK_FIELDS if raw else STOCK_FIELDS
+    print(f"抓取 {symbol} OHLC（{'未還原原始價' if raw else '還原股價'}）…")
+    frames = {k: data.get(ds) for k, ds in fields.items()}
     missing = [k for k, f in frames.items() if symbol not in f.columns]
     if "close" in missing:
         raise SystemExit(f"FinLab 資料中找不到 {symbol}")
@@ -100,6 +109,8 @@ def main() -> int:
     p.add_argument("--only", choices=["taiex", "etf"], help="只抓其中一份")
     p.add_argument("--etf", default="00631L", help="槓桿 ETF 代號，預設 00631L")
     p.add_argument("--outdir", default=str(ROOT / "data"))
+    p.add_argument("--raw-prices", action="store_true",
+                   help="改用未還原的原始價（會在除權息/分割日出現假跳空，僅供比對）")
     args = p.parse_args()
 
     login()
@@ -107,7 +118,7 @@ def main() -> int:
     if args.only != "etf":
         fetch_taiex(outdir / "taiex.csv")
     if args.only != "taiex":
-        fetch_etf(args.etf, outdir / f"{args.etf}.csv")
+        fetch_etf(args.etf, outdir / f"{args.etf}.csv", raw=args.raw_prices)
     return 0
 
 

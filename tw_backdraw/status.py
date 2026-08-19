@@ -95,10 +95,18 @@ def render_status(result: Result, bars: list[Bar], cfg: StrategyConfig,
     out.append(f"  賣 {cfg.exit.warn_derisk_fraction:>6.0%}　收盤 < {lv.warn_line:,.0f}（警戒線）")
     out.append(f"  賣 {'全部':>6}　收盤 < {lv.invalidation:,.0f}（失效線）")
     out.append("")
-    out.append(f"最壞情況    自現價跌到失效線 {lv.invalidation / c - 1:.1%}，"
-               f"00631L 約 {2 * (lv.invalidation / c - 1):.0%}；"
-               f"依已建立的 {t.filled_weight:.1%} 部位，權益衝擊約 "
-               f"{t.filled_weight * 2 * (lv.invalidation / c - 1):.1%}")
+
+    # 實際會把部位清光的第一條線：警戒線設定為全數出場時就是它，否則才是失效線
+    full_exit = (lv.warn_line if cfg.exit.warn_derisk_fraction >= 1.0 else lv.invalidation)
+    lev = cfg.sizing.leverage
+    gap = full_exit / c - 1
+    out.append(f"預期最大損失  跌到出清線 {full_exit:,.0f}（{gap:.1%}），"
+               f"00631L 約 {lev * gap:.0%}；依已建立的 {t.filled_weight:.1%} 部位，"
+               f"權益衝擊約 {t.filled_weight * lev * gap:.1%}")
+    if full_exit != lv.invalidation:
+        gap2 = lv.invalidation / c - 1
+        out.append(f"              （跳空直接摜破失效線 {lv.invalidation:,.0f} 的極端情形："
+                   f"{gap2:.1%}，權益衝擊約 {t.filled_weight * lev * gap2:.1%}）")
     return "\n".join(out)
 
 
