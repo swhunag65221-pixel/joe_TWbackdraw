@@ -56,8 +56,18 @@ from tw_backdraw.bars import Bar                                    # noqa: E402
 from tw_backdraw.config import PRESETS, StrategyConfig              # noqa: E402
 from tw_backdraw.engine import Engine, Result                       # noqa: E402
 
-SYMBOL = "00631L"
 TOKEN_ENV_VARS = ("Finlab_API_token", "FINLAB_API_TOKEN", "FINLAB_TOKEN")
+
+# 市場設定。leverage / fee / tax 會覆蓋 config 裡的對應欄位。
+MARKETS = {
+    "tw": dict(symbol="00631L", index_csv="taiex.csv", index_name="加權指數",
+               leverage=2.0, fee=0.001425 * 0.60, tax=0.001, carry=0.012,
+               finlab_market=None),
+    "us": dict(symbol="UPRO", index_csv="gspc.csv", index_name="S&P 500",
+               leverage=3.0, fee=0.0, tax=0.0, carry=0.0091,
+               finlab_market="US_STOCK"),
+}
+SYMBOL = MARKETS["tw"]["symbol"]      # 相容舊呼叫
 
 
 # --------------------------------------------------------------------------
@@ -75,27 +85,39 @@ def login_finlab() -> None:
 
 
 def load_bars(index_csv: str | Path | None = None,
-              etf_csv: str | Path | None = None) -> tuple[list[Bar], list[float]]:
-    """回傳對齊後的（加權指數日線, 00631L 收盤價）。
+              etf_csv: str | Path | None = None,
+              market: str = "tw") -> tuple[list[Bar], list[float]]:
+    """回傳對齊後的（指數日線, 槓桿 ETF 收盤價）。
 
-    優先讀 repo 內的 CSV（`scripts/fetch_finlab.py` 產生的還原股價）；
-    找不到就直接向 FinLab 取。
+    讀 repo 內的 CSV —— 由 `scripts/fetch_finlab.py` 產生（ETF 一律還原股價）。
     """
-    index_csv = Path(index_csv or ROOT / "data" / "taiex.csv")
-    etf_csv = Path(etf_csv or ROOT / "data" / f"{SYMBOL}.csv")
+    m = MARKETS[market]
+    index_csv = Path(index_csv or ROOT / "data" / m["index_csv"])
+    etf_csv = Path(etf_csv or ROOT / "data" / f"{m['symbol']}.csv")
+    for f in (index_csv, etf_csv):
+        if not f.exists():
+            raise SystemExit(
+                f"找不到 {f}。請先執行："
+                + ("python3 scripts/fetch_finlab.py --us" if market == "us"
+                   else "python3 scripts/fetch_finlab.py"))
+    return align_etf(load_csv(index_csv), load_csv(etf_csv))
 
-    if index_csv.exists() and etf_csv.exists():
-        return align_etf(load_csv(index_csv), load_csv(etf_csv))
 
-    login_finlab()
-    from finlab import data
+def market_config(cfg: StrategyConfig, market: str) -> StrategyConfig:
+    """把槓桿倍數與交易成本換成該市場的設定。"""
+    from dataclasses import replace
 
-    idx = data.get("taiex_total_index:收盤指數").iloc[:, 0].dropna()
-    etf = data.get("etl:adj_close")[SYMBOL].dropna()
-    common = idx.index.intersection(etf.index)
-    bars = [Bar(d=d.date(), open=float(idx[d]), high=float(idx[d]),
-                low=float(idx[d]), close=float(idx[d])) for d in common]
-    return bars, [float(etf[d]) for d in common]
+    from tw_backdraw.config import CostConfig, SizingConfig
+
+    m = MARKETS[market]
+    return replace(
+        cfg,
+        sizing=SizingConfig(risk_per_trade=cfg.sizing.risk_per_trade,
+                            leverage=m["leverage"], max_weight=cfg.sizing.max_weight,
+                            min_stop_distance=cfg.sizing.min_stop_distance),
+        cost=CostConfig(fee_rate=m["fee"], fee_discount=1.0, tax_rate=m["tax"],
+                        annual_carry=m["carry"], trading_days=cfg.cost.trading_days),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -129,17 +151,17 @@ def daily_weights(result: Result, bars: list[Bar]) -> dict:
 
 def build_position(cfg: StrategyConfig | None = None,
                    index_csv=None, etf_csv=None, start: str | None = None,
-                   end: str | None = None):
-    """產生 FinLab `sim()` 要的 position DataFrame（單一標的 00631L）。"""
+                   end: str | None = None, market: str = "tw"):
+    """產生 FinLab `sim()` 要的 position DataFrame（單一槓桿 ETF）。"""
     import pandas as pd
 
-    cfg = cfg or PRESETS["tuned"]
-    bars, etf = load_bars(index_csv, etf_csv)
+    cfg = market_config(cfg or PRESETS["tuned"], market)
+    bars, etf = load_bars(index_csv, etf_csv, market)
     result = Engine(cfg).run(bars, etf)
     weights = daily_weights(result, bars)
 
     pos = pd.DataFrame(
-        {SYMBOL: [weights[b.d] for b in bars]},
+        {MARKETS[market]["symbol"]: [weights[b.d] for b in bars]},
         index=pd.to_datetime([b.d for b in bars]),
     )
     if start:
@@ -151,10 +173,12 @@ def build_position(cfg: StrategyConfig | None = None,
 
 def build_report(preset: str = "tuned", cfg: StrategyConfig | None = None,
                  index_csv=None, etf_csv=None, start: str | None = None,
-                 end: str | None = None, name: str | None = None, **sim_kwargs):
+                 end: str | None = None, name: str | None = None,
+                 market: str = "tw", **sim_kwargs):
     """跑 `finlab.backtest.sim()`，回傳可以 `.display()` 的 Report。"""
-    cfg = cfg or PRESETS[preset]
-    pos, *_ = build_position(cfg, index_csv, etf_csv, start, end)
+    m = MARKETS[market]
+    cfg = market_config(cfg or PRESETS[preset], market)
+    pos, *_ = build_position(cfg, index_csv, etf_csv, start, end, market)
 
     login_finlab()
     from finlab.backtest import sim
@@ -162,11 +186,13 @@ def build_report(preset: str = "tuned", cfg: StrategyConfig | None = None,
     params = dict(
         trade_at_price="close",
         position_limit=1,
-        fee_ratio=cfg.cost.buy_cost,          # 0.1425% × 0.6 折
-        tax_ratio=cfg.cost.tax_rate,          # ETF 0.1%，非股票的 0.3%
-        name=name or f"台灣指數快速修復 {preset}（{SYMBOL}）",
+        fee_ratio=cfg.cost.buy_cost,
+        tax_ratio=cfg.cost.tax_rate,
+        name=name or f"{m['index_name']}快速修復 {preset}（{m['symbol']}）",
         upload=False,
     )
+    if m["finlab_market"]:
+        params["market"] = m["finlab_market"]
     params.update(sim_kwargs)
     return sim(pos, **params)
 
@@ -174,15 +200,15 @@ def build_report(preset: str = "tuned", cfg: StrategyConfig | None = None,
 # --------------------------------------------------------------------------
 # 驗證：FinLab 的結果應該與 tw_backdraw 內建回測一致
 # --------------------------------------------------------------------------
-def verify_against_engine(preset: str = "tuned", **kwargs) -> dict:
+def verify_against_engine(preset: str = "tuned", market: str = "tw", **kwargs) -> dict:
     """比對 FinLab 與 `tw_backdraw` 內建回測，逐筆核對進出場日期。"""
     from tw_backdraw.backtest import summarize
 
     cfg = PRESETS[preset]
-    pos, result, bars, etf = build_position(cfg, **kwargs)
+    pos, result, bars, etf = build_position(cfg, market=market, **kwargs)
     own = summarize(result)
 
-    report = build_report(preset=preset, **kwargs)
+    report = build_report(preset=preset, market=market, **kwargs)
     eq = report.creturn
     trades = report.trades.reset_index()
 
@@ -207,7 +233,7 @@ def verify_against_engine(preset: str = "tuned", **kwargs) -> dict:
         "own_mdd": own.max_drawdown,
         "finlab_mdd": float((eq / eq.cummax() - 1).min()),
         "own_trades": own.n_trades, "finlab_trades": len(trades),
-        "position_days": int((pos[SYMBOL] > 0).sum()),
+        "position_days": int((pos[MARKETS[market]["symbol"]] > 0).sum()),
         "rows": rows, "mismatches": mismatches, "report": report,
     }
 
@@ -215,13 +241,17 @@ def verify_against_engine(preset: str = "tuned", **kwargs) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description="用 FinLab sim 回測本策略")
     ap.add_argument("--preset", default="tuned", choices=sorted(PRESETS))
+    ap.add_argument("--market", default="tw", choices=sorted(MARKETS),
+                    help="tw = 加權指數/00631L（2x）；us = S&P500/UPRO（3x）")
     ap.add_argument("--start", help="回測起日 YYYY-MM-DD")
     ap.add_argument("--end", help="回測迄日 YYYY-MM-DD")
     ap.add_argument("--display", action="store_true", help="呼叫 report.display()")
     args = ap.parse_args()
 
-    v = verify_against_engine(preset=args.preset, start=args.start, end=args.end)
-    print(f"\n預設組 {args.preset}")
+    v = verify_against_engine(preset=args.preset, market=args.market,
+                              start=args.start, end=args.end)
+    m = MARKETS[args.market]
+    print(f"\n{m['index_name']} → {m['symbol']}（{m['leverage']:g}x）　預設組 {args.preset}")
     print(f"  在市天數        {v['position_days']}")
     print(f"  交易筆數  自建 {v['own_trades']:>3}   FinLab {v['finlab_trades']:>3}")
     print(f"  總報酬    自建 {v['own_total']:>9.1%}   FinLab {v['finlab_total']:>9.1%}")

@@ -30,8 +30,43 @@ sys.path.insert(0, str(ROOT))
 from tw_backdraw import load_csv                                      # noqa: E402
 from tw_backdraw.backtest import align_etf, run_backtest              # noqa: E402
 from tw_backdraw.config import (                                      # noqa: E402
-    DEFAULT_CONFIG, EntryConfig, ExitConfig, LevelConfig, SetupConfig,
+    DEFAULT_CONFIG, CostConfig, EntryConfig, ExitConfig, LevelConfig, SetupConfig,
+    SizingConfig, StrategyConfig,
 )
+
+
+def market_base(leverage: float = 2.0, fee_rate: float = 0.001425,
+                fee_discount: float = 0.60, tax_rate: float = 0.001,
+                annual_carry: float = 0.012) -> StrategyConfig:
+    """把市場相關的設定（槓桿倍數、交易成本）換掉，其餘沿用預設。
+
+    台股 00631L：2 倍、手續費 0.1425%×折扣、ETF 證交稅 0.1%、內扣約 1.2%。
+    美股 UPRO  ：3 倍、券商多為零手續費、無證交稅、內扣 0.91% 另加融資成本。
+    """
+    d = DEFAULT_CONFIG
+    return replace(
+        d,
+        sizing=SizingConfig(risk_per_trade=d.sizing.risk_per_trade, leverage=leverage,
+                            max_weight=d.sizing.max_weight,
+                            min_stop_distance=d.sizing.min_stop_distance),
+        cost=CostConfig(fee_rate=fee_rate, fee_discount=fee_discount,
+                        tax_rate=tax_rate, annual_carry=annual_carry,
+                        trading_days=d.cost.trading_days),
+    )
+
+
+def add_market_args(ap) -> None:
+    ap.add_argument("--leverage", type=float, default=2.0, help="ETF 槓桿倍數，預設 2（00631L）")
+    ap.add_argument("--fee", type=float, default=0.001425, help="券商手續費率")
+    ap.add_argument("--fee-discount", type=float, default=0.60, help="手續費折扣")
+    ap.add_argument("--tax", type=float, default=0.001, help="賣出交易稅率")
+    ap.add_argument("--carry", type=float, default=0.012, help="槓桿 ETF 年化內扣")
+
+
+def base_from_args(args) -> StrategyConfig:
+    return market_base(leverage=args.leverage, fee_rate=args.fee,
+                       fee_discount=args.fee_discount, tax_rate=args.tax,
+                       annual_carry=args.carry)
 
 # ---- 搜尋空間 ---------------------------------------------------------------
 # (exit_mode, ma_period, trail_drawdown) 綁在一起，避免產生無意義的組合
@@ -71,15 +106,16 @@ QUICK = {
 
 _BARS = None
 _ETF = None
+_BASE = None
 
 
-def _init(bars, etf):
-    global _BARS, _ETF
-    _BARS, _ETF = bars, etf
+def _init(bars, etf, base=None):
+    global _BARS, _ETF, _BASE
+    _BARS, _ETF, _BASE = bars, etf, base
 
 
-def build_config(p: dict):
-    d = DEFAULT_CONFIG
+def build_config(p: dict, base=None):
+    d = base or _BASE or DEFAULT_CONFIG
     mode, ma, trail = p["exit_style"]
     return replace(
         d,
@@ -104,7 +140,7 @@ def build_config(p: dict):
 
 def evaluate(p: dict) -> dict:
     try:
-        _, st = run_backtest(_BARS, build_config(p), _ETF)
+        _, st = run_backtest(_BARS, build_config(p, _BASE), _ETF)
     except Exception:
         return {}
     rec = dict(p)
@@ -143,7 +179,9 @@ def main() -> int:
                     help="排行榜的最低交易次數門檻，避免用少樣本換高勝率")
     ap.add_argument("--top", type=int, default=15)
     ap.add_argument("--out", help="把完整結果寫成 JSON")
+    add_market_args(ap)
     args = ap.parse_args()
+    base = base_from_args(args)
 
     bars = load_csv(args.csv)
     etf = None
@@ -153,10 +191,12 @@ def main() -> int:
     grid = QUICK if args.quick else GRID
     todo = list(combos(grid))
     print(f"資料 {bars[0].d} ~ {bars[-1].d}（{len(bars)} 根）")
-    print(f"參數組合 {len(todo):,} 組，{mp.cpu_count()} 核心\n")
+    print(f"參數組合 {len(todo):,} 組，{mp.cpu_count()} 核心")
+    print(f"市場設定：槓桿 {args.leverage:g}x、手續費 {args.fee * args.fee_discount:.4%}、"
+          f"交易稅 {args.tax:.2%}、年化內扣 {args.carry:.2%}\n")
 
     t0 = time.time()
-    with mp.Pool(mp.cpu_count(), initializer=_init, initargs=(bars, etf)) as pool:
+    with mp.Pool(mp.cpu_count(), initializer=_init, initargs=(bars, etf, base)) as pool:
         rows = [r for r in pool.imap_unordered(evaluate, todo, chunksize=256) if r]
     print(f"完成，耗時 {time.time() - t0:.0f} 秒\n")
 
@@ -197,10 +237,10 @@ def main() -> int:
     # ---- 預設值在分布中的位置 ----
     wins = sorted(r["win"] for r in rows)
     totals = sorted(r["total"] for r in rows)
-    _, st = run_backtest(bars, DEFAULT_CONFIG, etf)
+    _, st = run_backtest(bars, base, etf)
     def pct(sorted_vals, v):
         return sum(1 for x in sorted_vals if x <= v) / len(sorted_vals)
-    print(f"\n【預設參數的位置】勝率 {st.win_rate:.0%}（贏過 {pct(wins, st.win_rate):.0%} 的組合）、"
+    print(f"\n【預設參數（同市場設定）的位置】勝率 {st.win_rate:.0%}（贏過 {pct(wins, st.win_rate):.0%} 的組合）、"
           f"總報酬 {st.total_return:.1%}（贏過 {pct(totals, st.total_return):.0%} 的組合）")
     print(f"       全網格勝率中位數 {statistics.median(wins):.0%}、"
           f"總報酬中位數 {statistics.median(totals):.1%}")

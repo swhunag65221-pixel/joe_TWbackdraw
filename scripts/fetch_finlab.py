@@ -50,6 +50,20 @@ RAW_STOCK_FIELDS = {
     "close": "price:收盤價",
 }
 
+# 美股：S&P500 指數走 world_index，槓桿 ETF（UPRO/SPXL/TQQQ）走 us_fund_price
+US_INDEX_FIELDS = {
+    "open": "world_index:open",
+    "high": "world_index:high",
+    "low": "world_index:low",
+    "close": "world_index:adj_close",
+}
+US_FUND_FIELDS = {
+    "open": "us_fund_price:adj_open",
+    "high": "us_fund_price:adj_high",
+    "low": "us_fund_price:adj_low",
+    "close": "us_fund_price:adj_close",
+}
+
 TOKEN_ENV_VARS = ("Finlab_API_token", "FINLAB_API_TOKEN", "FINLAB_TOKEN")
 
 
@@ -104,9 +118,29 @@ def fetch_etf(symbol: str, out: Path, raw: bool = False) -> None:
     write_csv(pd.DataFrame({k: v for k, v in cols.items() if v is not None}), out)
 
 
+def fetch_column(fields: dict, symbol: str, out: Path, label: str) -> None:
+    """從多個寬表中取出同一個代號的欄位，組成 OHLC。"""
+    import pandas as pd
+    from finlab import data
+
+    print(f"抓取 {label} …")
+    cols = {}
+    for k, ds in fields.items():
+        f = data.get(ds)
+        if symbol in f.columns:
+            cols[k] = f[symbol]
+    if "close" not in cols:
+        raise SystemExit(f"FinLab 資料中找不到 {symbol}")
+    write_csv(pd.DataFrame(cols), out)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="用 FinLab 抓取策略所需日線")
     p.add_argument("--only", choices=["taiex", "etf"], help="只抓其中一份")
+    p.add_argument("--us", action="store_true",
+                   help="改抓美股：S&P500 指數（^GSPC）與槓桿 ETF（預設 UPRO）")
+    p.add_argument("--us-index", default="^GSPC", help="美股指數代號，預設 ^GSPC")
+    p.add_argument("--us-etf", default="UPRO", help="美股槓桿 ETF 代號，預設 UPRO")
     p.add_argument("--etf", default="00631L", help="槓桿 ETF 代號，預設 00631L")
     p.add_argument("--outdir", default=str(ROOT / "data"))
     p.add_argument("--raw-prices", action="store_true",
@@ -115,6 +149,13 @@ def main() -> int:
 
     login()
     outdir = Path(args.outdir)
+    if args.us:
+        name = args.us_index.lstrip("^").lower()
+        fetch_column(US_INDEX_FIELDS, args.us_index, outdir / f"{name}.csv",
+                     f"{args.us_index} 指數 OHLC")
+        fetch_column(US_FUND_FIELDS, args.us_etf, outdir / f"{args.us_etf}.csv",
+                     f"{args.us_etf} 還原股價 OHLC")
+        return 0
     if args.only != "etf":
         fetch_taiex(outdir / "taiex.csv")
     if args.only != "taiex":
