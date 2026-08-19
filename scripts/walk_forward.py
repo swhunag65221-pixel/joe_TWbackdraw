@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from tw_backdraw import load_csv                                       # noqa: E402
 from tw_backdraw.backtest import run_backtest                          # noqa: E402
-from tw_backdraw.config import DEFAULT_CONFIG                          # noqa: E402
+from tw_backdraw.config import DEFAULT_CONFIG, POST_CONFIG                          # noqa: E402
 from grid_search import GRID, build_config, combos                     # noqa: E402
 
 _BARS = None
@@ -106,9 +106,15 @@ def main() -> int:
         t = statistics.fmean(te[k]["total"] for k in picked)
         print(f"{desc:<24}{w:>12.1%}{w - base_win:>+10.1%}{t:>14.1%}{t - base_tot:>+10.1%}")
 
-    _, st = run_backtest(test, DEFAULT_CONFIG)
-    print(f"{'預設參數（未調校）':<24}{st.win_rate:>12.1%}{st.win_rate - base_win:>+10.1%}"
-          f"{st.total_return:>14.1%}{st.total_return - base_tot:>+10.1%}")
+    for label, cfg, note in (
+        ("專案預設 tuned", DEFAULT_CONFIG, "⚠ 樣本內"),
+        ("貼文原意 post", POST_CONFIG, ""),
+    ):
+        _, st = run_backtest(test, cfg)
+        print(f"{label:<24}{st.win_rate:>12.1%}{st.win_rate - base_win:>+10.1%}"
+              f"{st.total_return:>14.1%}{st.total_return - base_tot:>+10.1%}  {note}")
+    print("\n  ⚠ tuned 是用「含測試段」的完整資料選出來的，它在測試段的數字不是樣本外結果，")
+    print("    只能當作參考。真正的樣本外證據是上面四種選擇標準那幾列。")
 
     print("\n【參數可外推性】訓練段指標 vs 測試段指標的相關係數")
     for m in ("win", "total", "avg", "mdd"):
