@@ -21,6 +21,10 @@ class SetupConfig:
     max_repair_bars: int = 15
     # 訊號有效期；超過仍未創高也未失效就自然過期
     setup_expiry_bars: int = 120
+    # 修復視窗過期後，把參考高點重新錨定到「谷底之後的波段高」。
+    # 關掉的話，參考高點會一直釘在舊高，直到指數重新站上它為止 ——
+    # 台股 2000 年頭部之後花了 17.3 年才收復 10,202，等於中間完全看不到訊號。
+    reanchor_on_expiry: bool = True
 
 
 @dataclass(frozen=True)

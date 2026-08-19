@@ -89,17 +89,21 @@ python3 scripts/fetch_twse.py stock --stock 00631L --start 201410 --out data/006
 
 ```bash
 python3 -m tw_backdraw scan     --csv data/taiex.csv
+python3 -m tw_backdraw episodes --csv data/taiex.csv --since 2005-01-01   # 為什麼沒訊號
 python3 -m tw_backdraw backtest --csv data/taiex.csv -v
 python3 -m tw_backdraw backtest --csv data/taiex.csv --etf-csv data/00631L.csv -v
 ```
 
 沒指定 `--etf-csv` 時，會用指數日報酬合成一條 2 倍槓桿淨值（含內扣與波動耗損）來回測。
 
-**1999–2026 全期只觸發過 5 次訊號**，命中率 3/5、單筆平均 +5.3%、權益總報酬 +25.1%、
-最大回檔 −19.3%。唯一一次真正失敗的是 2000-03（網路泡沫頭部），兩段式停損把它控制在 −6.9%。
+**1999–2026 全期觸發 8 次訊號**，命中率 5/8、單筆平均 +4.0%、權益總報酬 +31.4%、
+最大回檔 −20.4%。賠最多的一次是 2000-03（網路泡沫頭部），兩段式停損把它控制在 −6.9%。
 完整結果與檢討見 [docs/strategy.md §9](docs/strategy.md)。
 
-> 5 次樣本推不出統計結論。這套策略的依據是貼文那 174 次跨國樣本，
+`episodes` 會列出每一段 ≥10% 的回檔以及它為什麼沒觸發，例如 2008 金融海嘯的
+−44.5% 那一段，15 日內只補回 17%；2020 COVID 只補回 42%——都是真的修復太慢。
+
+> 8 次樣本推不出統計結論。這套策略的依據是貼文那 174 次跨國樣本，
 > 台股回測只能確認「規則寫對了、執行得動」，不能用來驗證勝率。
 
 ### 目前部位該做什麼
@@ -148,14 +152,14 @@ python3 -m tw_backdraw backtest --csv data/taiex.csv --max-bars 25 --repair 0.60
 tw_backdraw/
   config.py      所有可調參數
   bars.py        日線資料結構與 CSV 讀取
-  setup.py       「快速修復」訊號辨識
+  setup.py       「快速修復」訊號辨識與回檔段落診斷
   levels.py      主防線 / 警戒線 / 失效線
   engine.py      進出場狀態機（含部位大小計算、往上加碼的風險縮放）
   leveraged.py   00631L 的 2 倍槓桿淨值模型（含內扣與波動耗損）
   plan.py        訊號 → 可下單的操作計畫
   status.py      進行中部位的現況與下一個觸發點
   backtest.py    回測與績效統計
-  cli.py         plan / scan / status / backtest 四個指令
+  cli.py         plan / scan / episodes / status / backtest 五個指令
 scripts/
   fetch_finlab.py  FinLab 日線抓取（主要）
   fetch_twse.py    證交所日線抓取（備援，不需帳號）

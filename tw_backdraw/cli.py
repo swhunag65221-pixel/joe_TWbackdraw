@@ -2,6 +2,7 @@
 
     python -m tw_backdraw plan --peak 47742 --trough 39933 --now 46200 --capital 1000000
     python -m tw_backdraw scan --csv data/taiex.csv
+    python -m tw_backdraw episodes --csv data/taiex.csv --since 2005-01-01
     python -m tw_backdraw status --csv data/taiex.csv --capital 1000000
     python -m tw_backdraw backtest --csv data/taiex.csv
 """
@@ -14,7 +15,7 @@ from .backtest import align_etf, run_backtest
 from .bars import load_csv
 from .config import DEFAULT_CONFIG, EntryConfig, SetupConfig, SizingConfig, StrategyConfig
 from .plan import build_plan
-from .setup import detect_setups
+from .setup import detect_setups, scan_episodes
 from .status import render_status
 
 
@@ -79,6 +80,29 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_episodes(args: argparse.Namespace) -> int:
+    """列出每一段回檔，以及它為什麼（沒）觸發訊號。"""
+    cfg = _config_from_args(args)
+    bars = load_csv(args.csv)
+    eps = scan_episodes(bars, cfg.setup)
+    if args.since:
+        eps = [e for e in eps if e.end_date.isoformat() >= args.since]
+    if args.until:
+        eps = [e for e in eps if e.peak_date.isoformat() <= args.until]
+    fired = sum(1 for e in eps if e.fired)
+    span = f"{args.since or bars[0].d} ~ {args.until or bars[-1].d}"
+    if args.since or args.until:
+        span += "（已篩選）"
+    print(f"{span}：{len(eps)} 段 ≥{cfg.setup.min_drawdown:.0%} 的回檔，"
+          f"其中 {fired} 段觸發訊號\n")
+    print(f"{'高點':<22}{'谷底':<22}{'跌幅':>7}{'破底':>5}  判定")
+    print("-" * 96)
+    for e in eps:
+        print(f"{e.peak_date!s} {e.peak:>9,.0f}  {e.trough_date!s} {e.trough:>9,.0f}"
+              f"{e.drop_pct:>7.1%}{e.lower_lows:>5}  {e.reason(cfg.setup)}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     cfg = _config_from_args(args)
     bars = load_csv(args.csv)
@@ -111,6 +135,13 @@ def build_parser() -> argparse.ArgumentParser:
     ss = sub.add_parser("scan", parents=[common], help="掃描歷史訊號")
     ss.add_argument("--csv", required=True, help="指數日線 CSV（date,close 為必要欄位）")
     ss.set_defaults(func=cmd_scan)
+
+    se = sub.add_parser("episodes", parents=[common],
+                        help="列出每一段回檔與它（沒）觸發訊號的原因")
+    se.add_argument("--csv", required=True, help="指數日線 CSV")
+    se.add_argument("--since", help="只看這個日期之後結束的段落 YYYY-MM-DD")
+    se.add_argument("--until", help="只看這個日期之前起漲的段落 YYYY-MM-DD")
+    se.set_defaults(func=cmd_episodes)
 
     st = sub.add_parser("status", parents=[common], help="目前部位現況與下一步")
     st.add_argument("--csv", required=True, help="指數日線 CSV")

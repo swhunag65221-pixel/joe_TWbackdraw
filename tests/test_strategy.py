@@ -9,6 +9,7 @@ import unittest
 from datetime import date, timedelta
 
 from tw_backdraw import build_levels, build_plan, detect_setups
+from tw_backdraw.setup import scan_episodes
 from tw_backdraw.bars import Bar
 from tw_backdraw.config import DEFAULT_CONFIG, ExitConfig, SetupConfig, StrategyConfig
 from tw_backdraw.engine import Engine, position_size
@@ -94,6 +95,47 @@ class TestSetupDetection(unittest.TestCase):
         setups = detect_setups(series(closes), DEFAULT_CONFIG.setup)
         self.assertEqual(len(setups), 1)
         self.assertAlmostEqual(setups[0].trough, deeper)
+
+
+class TestReanchor(unittest.TestCase):
+    """修復視窗到期後，參考高點必須改錨到谷底之後的波段高。
+
+    少了這一步，參考高點會一直釘在舊高直到指數重新站上為止 ——
+    台股 2000 年頭部之後 17.3 年沒收復，中間所有訊號都會被遮蔽。
+    """
+
+    def _series(self) -> list[float]:
+        # 舊高 10000 → 崩到 5000（慢速修復，不觸發）→ 在低檔形成新的 P/T 並快速修復
+        deep = 5000.0
+        slow = ramp(deep, 6500, 40)          # 40 根才爬回，遠超過 15 日視窗
+        newp = slow[-1]
+        dip = ramp(newp, newp * 0.87, 12)    # 自新高回檔 13%
+        rebound = ramp(dip[-1], dip[-1] + 0.80 * (newp - dip[-1]), 8)
+        return [10000.0] + ramp(10000, deep, 30) + slow + dip + rebound
+
+    def test_reanchored_low_level_setup_is_detected(self):
+        setups = detect_setups(series(self._series()), DEFAULT_CONFIG.setup)
+        self.assertEqual(len(setups), 1, [s.describe() for s in setups])
+        # 訊號的參考高點是改錨後的新高，不是 10000 那個舊高
+        self.assertLess(setups[0].peak, 7000)
+
+    def test_without_reanchor_the_detector_goes_blind(self):
+        cfg = SetupConfig(reanchor_on_expiry=False)
+        self.assertEqual(detect_setups(series(self._series()), cfg), [])
+
+    def test_episodes_explain_every_rejection(self):
+        eps = scan_episodes(series(self._series()), DEFAULT_CONFIG.setup)
+        self.assertGreaterEqual(len(eps), 2)
+        slow = eps[0]
+        self.assertFalse(slow.fired)
+        self.assertLess(slow.best_in_window, DEFAULT_CONFIG.setup.repair_fraction)
+        self.assertIn("只補回", slow.reason(DEFAULT_CONFIG.setup))
+        self.assertTrue(eps[-1].fired)
+
+    def test_episodes_and_setups_agree(self):
+        bars = series(self._series())
+        fired = [e for e in scan_episodes(bars, DEFAULT_CONFIG.setup) if e.fired]
+        self.assertEqual(len(fired), len(detect_setups(bars, DEFAULT_CONFIG.setup)))
 
 
 class TestSizing(unittest.TestCase):
