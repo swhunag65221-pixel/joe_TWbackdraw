@@ -70,6 +70,32 @@ MARKETS = {
 SYMBOL = MARKETS["tw"]["symbol"]      # 相容舊呼叫
 
 
+def us_fund_market():
+    """FinLab 內建的 `market="US_STOCK"` 只讀 `us_price`（個股），裡面沒有 UPRO。
+
+    槓桿 ETF 在 `us_fund_price`，所以這裡子類化 `USMarket`、把價格表指過去。
+    benchmark 沿用它原本的 `^GSPC`，正好就是我們的訊號來源。
+    """
+    from typing import ClassVar
+
+    from finlab.markets.us import USMarket
+
+    class USFundMarket(USMarket):
+        _price_table: ClassVar[str] = "us_fund_price"
+        _adj_prefix: ClassVar[str] = "us_fund_price:adj_"
+
+        @staticmethod
+        def get_name() -> str:
+            return "us_fund"
+
+        @staticmethod
+        def get_asset_id_to_name() -> dict:
+            # us_company_profile 只涵蓋個股，ETF 查不到；回傳空 dict 讓它退回顯示代號
+            return {}
+
+    return USFundMarket()
+
+
 # --------------------------------------------------------------------------
 # 資料
 # --------------------------------------------------------------------------
@@ -152,23 +178,29 @@ def daily_weights(result: Result, bars: list[Bar]) -> dict:
 def build_position(cfg: StrategyConfig | None = None,
                    index_csv=None, etf_csv=None, start: str | None = None,
                    end: str | None = None, market: str = "tw"):
-    """產生 FinLab `sim()` 要的 position DataFrame（單一槓桿 ETF）。"""
+    """產生 FinLab `sim()` 要的 position 與成交價 DataFrame（單一槓桿 ETF）。
+
+    成交價一併輸出，是因為 FinLab 內部的價格表保留了休市日的 NaN 列
+    （UPRO 全期 235 天、^GSPC 105 天）。若讓它自己挑成交日，訊號隔天可能
+    正好落在 NaN 列上，該筆交易的成交價與報酬都會變成 NaN。改用這裡清理過的
+    價格（已 dropna 並與指數對齊），兩邊的計算基礎才完全一致。
+    """
     import pandas as pd
 
+    symbol = MARKETS[market]["symbol"]
     cfg = market_config(cfg or PRESETS["tuned"], market)
     bars, etf = load_bars(index_csv, etf_csv, market)
     result = Engine(cfg).run(bars, etf)
     weights = daily_weights(result, bars)
 
-    pos = pd.DataFrame(
-        {MARKETS[market]["symbol"]: [weights[b.d] for b in bars]},
-        index=pd.to_datetime([b.d for b in bars]),
-    )
+    idx = pd.to_datetime([b.d for b in bars])
+    pos = pd.DataFrame({symbol: [weights[b.d] for b in bars]}, index=idx)
+    price = pd.DataFrame({symbol: etf}, index=idx)
     if start:
-        pos = pos[pos.index >= start]
+        pos, price = pos[pos.index >= start], price[price.index >= start]
     if end:
-        pos = pos[pos.index <= end]
-    return pos, result, bars, etf
+        pos, price = pos[pos.index <= end], price[price.index <= end]
+    return pos, result, bars, etf, price
 
 
 def build_report(preset: str = "tuned", cfg: StrategyConfig | None = None,
@@ -178,20 +210,24 @@ def build_report(preset: str = "tuned", cfg: StrategyConfig | None = None,
     """跑 `finlab.backtest.sim()`，回傳可以 `.display()` 的 Report。"""
     m = MARKETS[market]
     cfg = market_config(cfg or PRESETS[preset], market)
-    pos, *_ = build_position(cfg, index_csv, etf_csv, start, end, market)
+    pos, _res, _bars, _etf, price = build_position(cfg, index_csv, etf_csv,
+                                                   start, end, market)
 
     login_finlab()
     from finlab.backtest import sim
 
     params = dict(
-        trade_at_price="close",
+        # 直接餵清理過的收盤價，避免 FinLab price table 裡的休市日 NaN 列
+        trade_at_price=price,
         position_limit=1,
         fee_ratio=cfg.cost.buy_cost,
         tax_ratio=cfg.cost.tax_rate,
         name=name or f"{m['index_name']}快速修復 {preset}（{m['symbol']}）",
         upload=False,
     )
-    if m["finlab_market"]:
+    if m["finlab_market"] == "US_STOCK":
+        params["market"] = us_fund_market()
+    elif m["finlab_market"]:
         params["market"] = m["finlab_market"]
     params.update(sim_kwargs)
     return sim(pos, **params)
@@ -205,7 +241,7 @@ def verify_against_engine(preset: str = "tuned", market: str = "tw", **kwargs) -
     from tw_backdraw.backtest import summarize
 
     cfg = PRESETS[preset]
-    pos, result, bars, etf = build_position(cfg, market=market, **kwargs)
+    pos, result, bars, etf, _price = build_position(cfg, market=market, **kwargs)
     own = summarize(result)
 
     report = build_report(preset=preset, market=market, **kwargs)
@@ -238,6 +274,65 @@ def verify_against_engine(preset: str = "tuned", market: str = "tw", **kwargs) -
     }
 
 
+KEY_STATS = ("cagr", "total_return", "max_drawdown", "daily_sharpe",
+             "daily_sortino", "calmar", "win_ratio")
+
+
+def key_metrics(report) -> dict:
+    """抽出 CAGR / 總報酬 / 最大回檔 / Sharpe / Sortino / Calmar / 勝率。"""
+    st = report.get_stats()
+    return {k: st.get(k) for k in KEY_STATS}
+
+
+def buy_and_hold_metrics(symbol: str, market: str = "us",
+                         start=None, end=None) -> dict:
+    """同期買進持有的對照組，指標算法與 FinLab 的 get_stats 對齊。"""
+    import numpy as np
+    import pandas as pd
+
+    login_finlab()
+    from finlab import data
+
+    src = ("us_fund_price:adj_close" if market == "us" and symbol != "^GSPC"
+           else "world_index:adj_close" if symbol.startswith("^")
+           else "etl:adj_close")
+    px = data.get(src)[symbol].dropna()
+    if start:
+        px = px[px.index >= start]
+    if end:
+        px = px[px.index <= end]
+
+    ret = px.pct_change().dropna()
+    years = (px.index[-1] - px.index[0]).days / 365.25
+    total = float(px.iloc[-1] / px.iloc[0] - 1)
+    mdd = float((px / px.cummax() - 1).min())
+    return {
+        "cagr": (1 + total) ** (1 / years) - 1,
+        "total_return": total,
+        "max_drawdown": mdd,
+        "daily_sharpe": float(ret.mean() / ret.std() * np.sqrt(252)),
+        "daily_sortino": float(ret.mean() / ret[ret < 0].std() * np.sqrt(252)),
+        "calmar": ((1 + total) ** (1 / years) - 1) / abs(mdd),
+        "win_ratio": float((ret > 0).mean()),
+    }
+
+
+def render_metrics(rows: list[tuple[str, dict]]) -> str:
+    head = (f"{'':<30}{'CAGR':>9}{'總報酬':>11}{'最大回檔':>10}"
+            f"{'Sharpe':>9}{'Sortino':>9}{'Calmar':>9}")
+    out = [head, "-" * 78]
+    for name, m in rows:
+        def f(k, pct=True):
+            v = m.get(k)
+            if v is None:
+                return f"{'—':>9}"
+            return f"{v:>9.1%}" if pct else f"{v:>9.2f}"
+        out.append(f"{name:<30}{f('cagr')}{f('total_return'):>11}"
+                   f"{f('max_drawdown'):>10}{f('daily_sharpe', False)}"
+                   f"{f('daily_sortino', False)}{f('calmar', False)}")
+    return "\n".join(out)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="用 FinLab sim 回測本策略")
     ap.add_argument("--preset", default="tuned", choices=sorted(PRESETS))
@@ -246,7 +341,29 @@ def main() -> int:
     ap.add_argument("--start", help="回測起日 YYYY-MM-DD")
     ap.add_argument("--end", help="回測迄日 YYYY-MM-DD")
     ap.add_argument("--display", action="store_true", help="呼叫 report.display()")
+    ap.add_argument("--stats", action="store_true",
+                    help="只印 CAGR / MDD / Sharpe 等指標，並與買進持有對照")
     args = ap.parse_args()
+
+    if args.stats:
+        m = MARKETS[args.market]
+        rep = build_report(preset=args.preset, market=args.market,
+                           start=args.start, end=args.end)
+        pos, *_ = build_position(PRESETS[args.preset], start=args.start,
+                                 end=args.end, market=args.market)
+        pos = pos
+        lo, hi = pos.index[0], pos.index[-1]
+        rows = [(f"策略 {args.preset}（{m['symbol']}）", key_metrics(rep))]
+        bench = [m["symbol"]] + (["SPY", "^GSPC"] if args.market == "us" else ["0050"])
+        for b in bench:
+            try:
+                rows.append((f"買進持有 {b}", buy_and_hold_metrics(b, args.market, lo, hi)))
+            except Exception as exc:
+                print(f"  （{b} 無法取得：{exc}）")
+        print(f"\n{m['index_name']} → {m['symbol']}（{m['leverage']:g}x）　"
+              f"{lo.date()} ~ {hi.date()}")
+        print(render_metrics(rows))
+        return 0
 
     v = verify_against_engine(preset=args.preset, market=args.market,
                               start=args.start, end=args.end)

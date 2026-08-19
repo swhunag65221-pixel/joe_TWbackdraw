@@ -187,9 +187,24 @@ WINRATE_CONFIG = StrategyConfig(
                     exit_mode="ma_ratchet", ma_period=40),
 )
 
+#: 美股版（S&P 500 訊號 → UPRO 3x 執行）以「總報酬 ÷ 最大回檔」選出的參數。
+#: 與台股版的差異：回檔門檻 7%（S&P 500 在 FinLab 涵蓋的 10.6 年裡 ≥10% 的
+#: 回檔太少）、移動停利放寬到 10%（3 倍槓桿的波動較大）。
+#: 樣本內 8 筆、勝率 62%、總報酬 +627%、最大回檔 -37.5%、比值 16.7。
+#: ⚠️ min_drawdown 落在搜尋網格的下界，最佳值可能在網格之外 —— 見 docs/strategy.md §12。
+US_TUNED_CONFIG = StrategyConfig(
+    setup=SetupConfig(min_drawdown=0.07, repair_fraction=0.60, max_repair_bars=30),
+    levels=LevelConfig(warn_line_ratio=0.500),
+    entry=EntryConfig(base_weight=1.0, fill_timeout_bars=10),
+    exit=ExitConfig(warn_derisk_fraction=1.0, exit_mode="trail", trail_drawdown=0.10),
+    sizing=SizingConfig(leverage=3.0),
+    cost=CostConfig(fee_rate=0.0, fee_discount=1.0, tax_rate=0.0, annual_carry=0.0091),
+)
+
 PRESETS: dict[str, StrategyConfig] = {
     "tuned": TUNED_CONFIG,
     "post": POST_CONFIG,
     "balanced": BALANCED_CONFIG,
     "winrate": WINRATE_CONFIG,
+    "us_tuned": US_TUNED_CONFIG,
 }

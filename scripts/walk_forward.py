@@ -25,7 +25,9 @@ sys.path.insert(0, str(ROOT))
 from tw_backdraw import load_csv                                       # noqa: E402
 from tw_backdraw.backtest import run_backtest                          # noqa: E402
 from tw_backdraw.config import DEFAULT_CONFIG, POST_CONFIG                          # noqa: E402
-from grid_search import GRID, build_config, combos                     # noqa: E402
+from grid_search import (                                              # noqa: E402
+    GRID, add_market_args, base_from_args, build_config, combos,
+)
 
 _BARS = None
 
@@ -49,7 +51,7 @@ def _key(p: dict) -> tuple:
 
 def _eval(p: dict) -> tuple:
     try:
-        _, st = run_backtest(_BARS, build_config(p))
+        _, st = run_backtest(_BARS, build_config(p, _BASE))
         m = dict(win=st.win_rate, total=st.total_return, avg=st.avg_return,
                  mdd=st.max_drawdown, n=st.n_trades)
     except Exception:
@@ -57,9 +59,15 @@ def _eval(p: dict) -> tuple:
     return _key(p), m
 
 
-def scan(bars, todo) -> dict:
-    with mp.Pool(mp.cpu_count(), initializer=_init, initargs=(bars,)) as pool:
+def scan(bars, todo, base=None) -> dict:
+    with mp.Pool(mp.cpu_count(), initializer=_init, initargs=(bars, base)) as pool:
         return dict(pool.imap_unordered(_eval, todo, chunksize=256))
+
+
+def replace_market(cfg, base):
+    """把 preset 的槓桿與成本換成本次市場設定，其餘保持不變。"""
+    from dataclasses import replace
+    return replace(cfg, sizing=base.sizing, cost=base.cost)
 
 
 def corr(xs, ys) -> float:
@@ -76,7 +84,9 @@ def main() -> int:
     ap.add_argument("--split", default="2013-01-01")
     ap.add_argument("--top", type=int, default=50)
     ap.add_argument("--min-trades", type=int, default=5)
+    add_market_args(ap)
     args = ap.parse_args()
+    base = base_from_args(args)
 
     bars = load_csv(args.csv)
     train = [b for b in bars if b.iso < args.split]
@@ -86,9 +96,9 @@ def main() -> int:
 
     todo = list(combos(GRID))
     print(f"\n掃描訓練段 {len(todo):,} 組 …")
-    tr = scan(train, todo)
+    tr = scan(train, todo, base)
     print("掃描測試段 …")
-    te = scan(test, todo)
+    te = scan(test, todo, base)
 
     shared = [k for k in tr if k in te]
     ok = [k for k in shared if tr[k]["n"] >= args.min_trades]
@@ -110,7 +120,7 @@ def main() -> int:
         ("專案預設 tuned", DEFAULT_CONFIG, "⚠ 樣本內"),
         ("貼文原意 post", POST_CONFIG, ""),
     ):
-        _, st = run_backtest(test, cfg)
+        _, st = run_backtest(test, replace_market(cfg, base))
         print(f"{label:<24}{st.win_rate:>12.1%}{st.win_rate - base_win:>+10.1%}"
               f"{st.total_return:>14.1%}{st.total_return - base_tot:>+10.1%}  {note}")
     print("\n  ⚠ tuned 是用「含測試段」的完整資料選出來的，它在測試段的數字不是樣本外結果，")
