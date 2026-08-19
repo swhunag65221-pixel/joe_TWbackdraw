@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""樣本外驗證：把 grid search 選出來的參數拿到另一段期間去跑。
+"""樣本外驗證：用前半段選參數，拿到後半段驗收。
 
     python3 scripts/walk_forward.py --split 2013-01-01
 
-做法很簡單，也很殘忍：
-    1. 只用前半段資料跑 grid search，挑出勝率最高的 K 組參數
-    2. 把這 K 組拿到後半段（完全沒看過的資料）跑一次
-    3. 跟預設參數在後半段的表現比較
+前後兩段各掃一次完整網格，然後用不同的「選擇標準」各挑前 K 組，
+比較它們在測試段的表現。同時輸出訓練段與測試段各項指標的相關係數 ——
+那是「參數可不可以外推」最直接的量化。
 
-如果「前半段最佳」在後半段沒有優勢，就代表 grid search 挑到的是雜訊。
-以台股這種個位數訊號的樣本量，這個結果幾乎是可以預期的 —— 本工具的用途
-是把「可以預期」變成「看得到的數字」。
+以台股個位數到二十幾筆的樣本量，這個測試的統計檢定力很低。它的用途是
+把「調參到底有沒有用」變成看得到的數字，不是拿來下結論。
 """
 
 from __future__ import annotations
@@ -31,38 +29,52 @@ from grid_search import GRID, build_config, combos                     # noqa: E
 
 _BARS = None
 
+# 選擇標準：名稱 → (排序鍵, 說明)
+CRITERIA = {
+    "win": (lambda m: (m["win"], m["total"]), "勝率（次要：總報酬）"),
+    "total": (lambda m: (m["total"],), "總報酬"),
+    "calmar": (lambda m: (m["total"] / abs(m["mdd"]) if m["mdd"] else 0,), "總報酬 ÷ 最大回檔"),
+    "avg": (lambda m: (m["avg"],), "單筆平均報酬"),
+}
+
 
 def _init(bars):
     global _BARS
     _BARS = bars
 
 
+def _key(p: dict) -> tuple:
+    return tuple(sorted((k, str(v)) for k, v in p.items()))
+
+
 def _eval(p: dict) -> tuple:
     try:
         _, st = run_backtest(_BARS, build_config(p))
+        m = dict(win=st.win_rate, total=st.total_return, avg=st.avg_return,
+                 mdd=st.max_drawdown, n=st.n_trades)
     except Exception:
-        return (-1.0, -1.0, 0, p)
-    return (st.win_rate, st.total_return, st.n_trades, p)
+        m = dict(win=0.0, total=-1.0, avg=-1.0, mdd=-1.0, n=0)
+    return _key(p), m
 
 
-def run_all(bars, todo):
+def scan(bars, todo) -> dict:
     with mp.Pool(mp.cpu_count(), initializer=_init, initargs=(bars,)) as pool:
-        return list(pool.imap_unordered(_eval, todo, chunksize=256))
+        return dict(pool.imap_unordered(_eval, todo, chunksize=256))
 
 
-def summarize(label, rows):
-    wins = [r[0] for r in rows]
-    tots = [r[1] for r in rows]
-    print(f"  {label:<28}勝率 中位數 {statistics.median(wins):>5.0%}　"
-          f"平均 {statistics.fmean(wins):>5.0%}　｜　總報酬 中位數 {statistics.median(tots):>7.1%}　"
-          f"平均 {statistics.fmean(tots):>7.1%}")
+def corr(xs, ys) -> float:
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    sx, sy = statistics.pstdev(xs), statistics.pstdev(ys)
+    if sx == 0 or sy == 0:
+        return 0.0
+    return sum((a - mx) * (b - my) for a, b in zip(xs, ys)) / len(xs) / (sx * sy)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="樣本外驗證")
     ap.add_argument("--csv", default=str(ROOT / "data" / "taiex.csv"))
-    ap.add_argument("--split", default="2013-01-01", help="切分日期 YYYY-MM-DD")
-    ap.add_argument("--top", type=int, default=50, help="從訓練段挑幾組進入樣本外測試")
+    ap.add_argument("--split", default="2013-01-01")
+    ap.add_argument("--top", type=int, default=50)
     ap.add_argument("--min-trades", type=int, default=5)
     args = ap.parse_args()
 
@@ -70,35 +82,39 @@ def main() -> int:
     train = [b for b in bars if b.iso < args.split]
     test = [b for b in bars if b.iso >= args.split]
     print(f"訓練段 {train[0].d} ~ {train[-1].d}（{len(train)} 根）")
-    print(f"測試段 {test[0].d} ~ {test[-1].d}（{len(test)} 根）\n")
+    print(f"測試段 {test[0].d} ~ {test[-1].d}（{len(test)} 根）")
 
     todo = list(combos(GRID))
-    print(f"訓練段掃描 {len(todo):,} 組 …")
-    tr = run_all(train, todo)
-    eligible = [r for r in tr if r[2] >= args.min_trades]
-    if not eligible:
-        print("訓練段沒有任何組合達到最低交易次數門檻")
-        return 1
-    picked = sorted(eligible, key=lambda r: (-r[0], -r[1]))[:args.top]
-    print(f"  達門檻 {len(eligible):,} 組，取前 {len(picked)} 組")
-    print(f"  訓練段前 {len(picked)} 組：勝率 {picked[0][0]:.0%}~{picked[-1][0]:.0%}，"
-          f"平均總報酬 {statistics.fmean(r[1] for r in picked):.1%}\n")
+    print(f"\n掃描訓練段 {len(todo):,} 組 …")
+    tr = scan(train, todo)
+    print("掃描測試段 …")
+    te = scan(test, todo)
 
-    print(f"測試段驗證 …")
-    te_picked = run_all(test, [r[3] for r in picked])
-    te_all = run_all(test, todo)
+    shared = [k for k in tr if k in te]
+    ok = [k for k in shared if tr[k]["n"] >= args.min_trades]
+    print(f"\n訓練段達 {args.min_trades} 筆門檻：{len(ok):,} / {len(shared):,} 組")
 
-    print("\n【測試段表現】")
-    summarize("訓練段挑出的前段班", te_picked)
-    summarize("測試段全網格", te_all)
+    base_win = statistics.fmean(te[k]["win"] for k in shared)
+    base_tot = statistics.fmean(te[k]["total"] for k in shared)
+    print(f"測試段全網格基準：平均勝率 {base_win:.1%}　平均總報酬 {base_tot:.1%}\n")
+
+    print(f"{'訓練段選擇標準':<24}{'測試段勝率':>12}{'vs 基準':>10}{'測試段總報酬':>14}{'vs 基準':>10}")
+    print("-" * 72)
+    for name, (keyf, desc) in CRITERIA.items():
+        picked = sorted(ok, key=lambda k: keyf(tr[k]), reverse=True)[:args.top]
+        w = statistics.fmean(te[k]["win"] for k in picked)
+        t = statistics.fmean(te[k]["total"] for k in picked)
+        print(f"{desc:<24}{w:>12.1%}{w - base_win:>+10.1%}{t:>14.1%}{t - base_tot:>+10.1%}")
+
     _, st = run_backtest(test, DEFAULT_CONFIG)
-    print(f"  {'預設參數':<28}勝率 {st.win_rate:>10.0%}　　　　｜　總報酬 {st.total_return:>16.1%}"
-          f"（{st.n_trades} 筆）")
+    print(f"{'預設參數（未調校）':<24}{st.win_rate:>12.1%}{st.win_rate - base_win:>+10.1%}"
+          f"{st.total_return:>14.1%}{st.total_return - base_tot:>+10.1%}")
 
-    win_lift = statistics.fmean(r[0] for r in te_picked) - statistics.fmean(r[0] for r in te_all)
-    ret_lift = statistics.fmean(r[1] for r in te_picked) - statistics.fmean(r[1] for r in te_all)
-    print(f"\n  前段班相對全網格的樣本外優勢：勝率 {win_lift:+.1%}　總報酬 {ret_lift:+.1%}")
-    print("  （接近 0 或為負，代表 grid search 選到的是雜訊而非訊號）")
+    print("\n【參數可外推性】訓練段指標 vs 測試段指標的相關係數")
+    for m in ("win", "total", "avg", "mdd"):
+        c = corr([tr[k][m] for k in shared], [te[k][m] for k in shared])
+        print(f"  {m:<8}{c:>+7.3f}")
+    print("  （越接近 0，代表在訓練段調出來的優勢越無法帶到測試段）")
     return 0
 
 
