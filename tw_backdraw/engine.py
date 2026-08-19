@@ -213,6 +213,8 @@ class Engine:
                     # (c) 減碼後收復主防線 → 補回一次
                     if derisked and not reloaded and adds_allowed and c >= lv.half_line and units > 0:
                         reloaded = True
+                        # 解除減碼旗標：回補之後若再度跌破警戒線，還要能再減一次
+                        derisked = False
                         pending.append(("buy", trade.filled_weight * cfg.exit.warn_derisk_fraction,
                                         f"回補：收復主防線 {lv.half_line:,.0f}"))
 

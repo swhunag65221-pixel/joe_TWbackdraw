@@ -175,6 +175,29 @@ class TestEngine(unittest.TestCase):
         self.assertTrue(any("移動停利" in r for r in sells), sells)
         self.assertGreater(t.ret, 0.0)
 
+    def test_derisk_then_reload_when_the_main_line_is_reclaimed(self):
+        base = TROUGH + 0.80 * 7809
+        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
+        # 跌破 38.2% 警戒線 → 減碼；再收復 50% 主防線 → 回補一次
+        closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
+                  + ramp(base, lv.warn_line - 200, 10)
+                  + ramp(lv.warn_line - 200, lv.half_line + 400, 10) + [lv.half_line + 500] * 3)
+        _, res = self._run(closes)
+        t = res.trades[0]
+        self.assertTrue(any("警戒減碼" in f.reason for f in t.fills if f.side == "sell"))
+        self.assertTrue(any("回補" in f.reason for f in t.fills if f.side == "buy"))
+
+    def test_no_adds_below_the_main_line(self):
+        base = TROUGH + 0.80 * 7809
+        lv = build_levels(PEAK, TROUGH, DEFAULT_CONFIG.levels)
+        # 直接摜破主防線（−5% 以上），但 caution 區不得加碼
+        closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
+                  + [lv.half_line - 300] * 5)
+        _, res = self._run(closes)
+        buys = [f.reason for f in res.trades[0].fills if f.side == "buy"]
+        self.assertEqual(len(buys), 1, buys)          # 只有底倉
+        self.assertIn("底倉", buys[0])
+
     def test_no_trade_when_repair_is_slow(self):
         closes = [PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, PEAK, 60)
         _, res = self._run(closes)
