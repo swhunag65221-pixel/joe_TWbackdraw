@@ -376,6 +376,33 @@ class TestPlan(unittest.TestCase):
         for token in ("47,742", "43,838", "42,916", "39,933"):
             self.assertIn(token, text)
 
+    def test_render_follows_the_config_not_hardcoded_post_rules(self):
+        """輸出必須反映實際設定 —— 曾經寫死成貼文版，導致計畫書講「減碼一半」
+        但引擎其實是全數出場。"""
+        post = build_plan(PEAK, TROUGH, 46200, POST).render()
+        self.assertIn("減碼 50%", post)
+        self.assertIn("賣出 33% 落袋", post) if POST.exit.target_take_fraction else None
+        self.assertIn("42,916", post)          # 38.2% 警戒線與主防線不同
+
+        deflt = build_plan(PEAK, TROUGH, 46200, DEFAULT_CONFIG).render()
+        self.assertIn("全部出場", deflt)
+        self.assertNotIn("減碼一半", deflt)
+        self.assertIn("不賣（前高不是賣出的理由）", deflt)
+        self.assertIn("主防線 = 警戒線", deflt)   # 兩條線重合時只印一條
+
+    def test_render_describes_the_configured_exit_mode(self):
+        cfg = StrategyConfig(setup=DEFAULT_CONFIG.setup, levels=DEFAULT_CONFIG.levels,
+                             entry=DEFAULT_CONFIG.entry,
+                             exit=ExitConfig(exit_mode="ma_ratchet", ma_period=40),
+                             sizing=DEFAULT_CONFIG.sizing, cost=DEFAULT_CONFIG.cost)
+        text = build_plan(PEAK, TROUGH, 46200, cfg).render()
+        self.assertIn("MA40", text)
+        self.assertNotIn("移動停利", text)
+
+    def test_no_ladder_means_no_timeout_line(self):
+        self.assertEqual(len(build_plan(PEAK, TROUGH, 46200, DEFAULT_CONFIG).orders), 1)
+        self.assertGreater(len(build_plan(PEAK, TROUGH, 46200, POST).orders), 1)
+
 
 class TestMovingAverageExit(unittest.TestCase):
     def test_moving_average_warms_up(self):

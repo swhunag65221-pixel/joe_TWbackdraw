@@ -23,6 +23,7 @@ class TradePlan:
     reference_index: float
     target_weight: float
     orders: list[Order]
+    cfg: StrategyConfig
     capital: float | None = None
 
     def render(self) -> str:
@@ -36,11 +37,21 @@ class TradePlan:
         out.append(f"波段谷底 T        {lv.trough:>10,.0f}   ← 失效線：收盤跌破 = 全部出場")
         out.append(f"跌幅 R            {lv.drop:>10,.0f} 點 ({lv.drop_pct:.1%})")
         out.append("")
+        ex, lc = self.cfg.exit, self.cfg.levels
+        derisk = "全部出場" if ex.warn_derisk_fraction >= 1.0 else f"減碼 {ex.warn_derisk_fraction:.0%}"
         out.append("關鍵價位")
         out.append(f"  61.8% 回補      {lv.trough + 0.618 * lv.drop:>10,.0f}")
-        out.append(f"  主防線 (50%)    {lv.half_line:>10,.0f}   歷史回檔多數止步於此")
-        out.append(f"  容忍緩衝 (-0.5%){lv.half_line_with_buffer:>10,.0f}   假跌破區，不加碼也不減碼")
-        out.append(f"  警戒線 (38.2%)  {lv.warn_line:>10,.0f}   收盤跌破 → 減碼一半")
+        if abs(lc.warn_line_ratio - lc.half_line_ratio) < 1e-9:
+            # 警戒線與主防線重合：只印一條，避免看起來像兩個不同的動作
+            out.append(f"  主防線 = 警戒線 {lv.half_line:>10,.0f}   "
+                       f"({lc.half_line_ratio:.1%} 回補位) 收盤跌破 → {derisk}")
+            out.append(f"  容忍緩衝 (-{lc.half_line_buffer:.1%}){lv.half_line_with_buffer:>8,.0f}   "
+                       f"假跌破區，不動作")
+        else:
+            out.append(f"  主防線 ({lc.half_line_ratio:.0%})    {lv.half_line:>10,.0f}   歷史回檔多數止步於此")
+            out.append(f"  容忍緩衝 (-{lc.half_line_buffer:.1%}){lv.half_line_with_buffer:>8,.0f}   "
+                       f"假跌破區，不加碼也不減碼")
+            out.append(f"  警戒線 ({lc.warn_line_ratio:.1%}) {lv.warn_line:>10,.0f}   收盤跌破 → {derisk}")
         out.append(f"  失效線          {lv.invalidation:>10,.0f}   收盤跌破 → 清倉")
         out.append("")
         out.append(f"現價（參考）      {self.reference_index:>10,.0f}   "
@@ -50,7 +61,8 @@ class TradePlan:
         out.append(f"目標總持股水位    {self.target_weight:.0%} 的權益"
                    + (f"（約 {self.capital * self.target_weight:,.0f} 元）" if self.capital else ""))
         out.append("")
-        out.append("進場梯（權重為佔總權益比例）")
+        out.append("進場梯（權重為佔總權益比例）"
+                   if len(self.orders) > 1 else "進場（權重為佔總權益比例）")
         for o in self.orders:
             if o.weight > 0:
                 size = f"{o.weight:>6.1%}"
@@ -61,9 +73,18 @@ class TradePlan:
             out.append(f"  {o.tag:<10} {size}{amount:<18} {o.trigger}{level}")
         out.append("")
         out.append("出場")
-        out.append(f"  觸及 {lv.peak:,.0f}    → 賣出 1/3 落袋，其餘轉移動停利")
-        out.append("  移動停利          自波段最高收盤回檔 8%（指數）→ 出清")
-        out.append(f"  收盤 < {lv.warn_line:,.0f}   → 減碼一半，停止加碼")
+        if ex.target_take_fraction > 0:
+            out.append(f"  觸及 {lv.peak:,.0f}    → 賣出 {ex.target_take_fraction:.0%} 落袋，其餘轉停利")
+        else:
+            out.append(f"  觸及 {lv.peak:,.0f}    → 不賣（前高不是賣出的理由），啟動停利")
+        if ex.exit_mode == "trail":
+            out.append(f"  移動停利          自波段最高收盤回檔 {ex.trail_drawdown:.0%}（指數）→ 出清")
+        elif ex.exit_mode == "ma_ratchet":
+            out.append(f"  均線棘輪          出場線 = max(前高, MA{ex.ma_period})，跌破 → 出清")
+        else:
+            out.append(f"  停利（取較緊）    max(前高, MA{ex.ma_period}) 與 "
+                       f"自高點回檔 {ex.trail_drawdown:.0%} 兩者取高 → 跌破出清")
+        out.append(f"  收盤 < {lv.warn_line:,.0f}   → {derisk}")
         out.append(f"  收盤 < {lv.invalidation:,.0f}   → 全部出場，不留倉")
         out.append("")
         out.append("提醒：00631L 為 2 倍槓桿，指數 -1% ≈ ETF -2%（另有波動耗損與內扣）。")
@@ -89,10 +110,11 @@ def build_plan(peak: float, trough: float, reference_index: float,
                   trigger=f"自訊號後波段最高收盤回檔 {thr:.0%} 且收盤仍在 {lv.half_line_with_buffer:,.0f} 之上",
                   index_level=reference_index * (1 - thr))
         )
-    orders.append(
-        Order(tag="時間補齊", weight=0.0,
-              trigger=f"訊號後 {cfg.entry.fill_timeout_bars} 個交易日仍未觸發回檔梯 → 剩餘部位市價補齊",
-              index_level=None)
-    )
+    if len(orders) > 1:      # 只有存在加碼梯時，時間補齊才有意義
+        orders.append(
+            Order(tag="時間補齊", weight=0.0,
+                  trigger=f"訊號後 {cfg.entry.fill_timeout_bars} 個交易日仍未觸發回檔梯 → 剩餘部位市價補齊",
+                  index_level=None)
+        )
     return TradePlan(levels=lv, reference_index=reference_index, target_weight=target,
-                     orders=orders, capital=capital)
+                     orders=orders, cfg=cfg, capital=capital)
