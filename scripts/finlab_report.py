@@ -282,22 +282,39 @@ def verify_against_engine(preset: str = "tuned", market: str = "tw", **kwargs) -
     }
 
 
-KEY_STATS = ("cagr", "total_return", "max_drawdown", "daily_sharpe",
-             "daily_sortino", "calmar", "win_ratio")
+def series_metrics(series) -> dict:
+    """由一條權益／價格曲線算出各項指標。
+
+    策略與買進持有**一律用同一套公式**。FinLab 的 `get_stats()` 也提供
+    daily_sharpe，但它的定義與這裡不同（實測策略為 0.859 vs 0.928，
+    CAGR 與 MDD 則完全相同），兩者混用會讓對照表變成蘋果比橘子。
+    """
+    import numpy as np
+
+    ret = series.pct_change().dropna()
+    years = (series.index[-1] - series.index[0]).days / 365.25
+    total = float(series.iloc[-1] / series.iloc[0] - 1)
+    mdd = float((series / series.cummax() - 1).min())
+    cagr = (1 + total) ** (1 / years) - 1
+    downside = ret[ret < 0].std()
+    return {
+        "cagr": cagr,
+        "total_return": total,
+        "max_drawdown": mdd,
+        "sharpe": float(ret.mean() / ret.std() * np.sqrt(252)),
+        "sortino": float(ret.mean() / downside * np.sqrt(252)) if downside else None,
+        "calmar": cagr / abs(mdd) if mdd else None,
+    }
 
 
 def key_metrics(report) -> dict:
-    """抽出 CAGR / 總報酬 / 最大回檔 / Sharpe / Sortino / Calmar / 勝率。"""
-    st = report.get_stats()
-    return {k: st.get(k) for k in KEY_STATS}
+    """策略的指標，與 buy_and_hold_metrics 使用同一套公式。"""
+    return series_metrics(report.creturn)
 
 
 def buy_and_hold_metrics(symbol: str, market: str = "us",
                          start=None, end=None) -> dict:
-    """同期買進持有的對照組，指標算法與 FinLab 的 get_stats 對齊。"""
-    import numpy as np
-    import pandas as pd
-
+    """同期買進持有的對照組。"""
     login_finlab()
     from finlab import data
 
@@ -309,20 +326,7 @@ def buy_and_hold_metrics(symbol: str, market: str = "us",
         px = px[px.index >= start]
     if end:
         px = px[px.index <= end]
-
-    ret = px.pct_change().dropna()
-    years = (px.index[-1] - px.index[0]).days / 365.25
-    total = float(px.iloc[-1] / px.iloc[0] - 1)
-    mdd = float((px / px.cummax() - 1).min())
-    return {
-        "cagr": (1 + total) ** (1 / years) - 1,
-        "total_return": total,
-        "max_drawdown": mdd,
-        "daily_sharpe": float(ret.mean() / ret.std() * np.sqrt(252)),
-        "daily_sortino": float(ret.mean() / ret[ret < 0].std() * np.sqrt(252)),
-        "calmar": ((1 + total) ** (1 / years) - 1) / abs(mdd),
-        "win_ratio": float((ret > 0).mean()),
-    }
+    return series_metrics(px)
 
 
 def render_metrics(rows: list[tuple[str, dict]]) -> str:
@@ -336,8 +340,8 @@ def render_metrics(rows: list[tuple[str, dict]]) -> str:
                 return f"{'—':>9}"
             return f"{v:>9.1%}" if pct else f"{v:>9.2f}"
         out.append(f"{name:<30}{f('cagr')}{f('total_return'):>11}"
-                   f"{f('max_drawdown'):>10}{f('daily_sharpe', False)}"
-                   f"{f('daily_sortino', False)}{f('calmar', False)}")
+                   f"{f('max_drawdown'):>10}{f('sharpe', False)}"
+                   f"{f('sortino', False)}{f('calmar', False)}")
     return "\n".join(out)
 
 

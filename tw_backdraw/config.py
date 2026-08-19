@@ -201,10 +201,35 @@ US_TUNED_CONFIG = StrategyConfig(
     cost=CostConfig(fee_rate=0.0, fee_discount=1.0, tax_rate=0.0, annual_carry=0.0091),
 )
 
+#: NASDAQ 版（^IXIC 訊號 → TQQQ 3x 執行）以「總報酬 ÷ 最大回檔」選出的參數。
+#: 樣本內 8 筆、勝率 88%、總報酬 +933%、最大回檔 -30.8%、比值 30.3。
+#:
+#: ⚠️ trail_drawdown=0.12 是**尖峰而非平台**：鄰近值的比值為 10%→19.0、
+#: 12%→30.3、15%→15.7，且交易數從 12 筆掉到 8 筆。這是過擬合的典型特徵，
+#: 較穩健的鄰居是 trail=0.08（16 筆、比值 21.3）。詳見 docs/strategy.md §13。
+NQ_TUNED_CONFIG = StrategyConfig(
+    setup=SetupConfig(min_drawdown=0.07, repair_fraction=0.60, max_repair_bars=30),
+    levels=LevelConfig(warn_line_ratio=0.382),
+    entry=EntryConfig(base_weight=1.0, fill_timeout_bars=10),
+    exit=ExitConfig(warn_derisk_fraction=1.0, exit_mode="trail", trail_drawdown=0.12),
+    sizing=SizingConfig(leverage=3.0),
+    cost=CostConfig(fee_rate=0.0, fee_discount=1.0, tax_rate=0.0, annual_carry=0.0095),
+)
+
+#: 同上但把移動停利改成鄰域穩健的 8%：16 筆、勝率 62%、+570%、-26.8%、比值 21.3。
+NQ_ROBUST_CONFIG = StrategyConfig(
+    setup=NQ_TUNED_CONFIG.setup, levels=NQ_TUNED_CONFIG.levels,
+    entry=NQ_TUNED_CONFIG.entry,
+    exit=ExitConfig(warn_derisk_fraction=1.0, exit_mode="trail", trail_drawdown=0.08),
+    sizing=NQ_TUNED_CONFIG.sizing, cost=NQ_TUNED_CONFIG.cost,
+)
+
 PRESETS: dict[str, StrategyConfig] = {
     "tuned": TUNED_CONFIG,
     "post": POST_CONFIG,
     "balanced": BALANCED_CONFIG,
     "winrate": WINRATE_CONFIG,
     "us_tuned": US_TUNED_CONFIG,
+    "nq_tuned": NQ_TUNED_CONFIG,
+    "nq_robust": NQ_ROBUST_CONFIG,
 }
