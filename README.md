@@ -151,6 +151,42 @@ python3 -m tw_backdraw status --csv data/taiex.csv --etf-csv data/00631L.csv --c
 
 `scripts/current_plan.py --capital 1000000` 會一次印出完整計畫加上這份現況。
 
+### 用 FinLab `sim()` 產生互動報表
+
+```python
+import sys; sys.path.insert(0, "scripts")
+from finlab_report import build_report
+
+report = build_report()                  # 預設參數（報酬÷回檔最佳）
+report.display()
+
+report = build_report(preset="post")     # 貼文原意
+report = build_report(preset="balanced") # MA40 棘輪出場
+```
+
+命令列驗證（不開互動介面）：
+
+```bash
+.venv/bin/python scripts/finlab_report.py --preset tuned
+```
+
+```
+交易筆數  自建   7   FinLab   7
+總報酬    自建   1028.2%   FinLab   1004.5%
+最大回檔  自建    -27.3%   FinLab    -27.3%
+  ✓ 7 筆進出場日期全部一致
+```
+
+**時點對齊是這裡最容易錯的地方**：FinLab 的 `position` 日期是**訊號日**，
+實際成交落在**次一交易日**（trades 表的 `entry_sig_date` 與 `entry_date` 差一天），
+而 `tw_backdraw` 的 `Fill.d` 記的是成交日 —— 權重必須往前挪一根 K 才對得上，
+否則整套策略會慢一天進出場。`verify_against_engine()` 就是用來擋這個錯的。
+
+兩邊數字的讀法：FinLab trades 表的 `return` 是**個股報酬**，`Trade.ret` 是
+**權益報酬**，單一標的下 `權益 ≈ 個股 × 目標水位`（預設 0.8）。總報酬會差 1~2%，
+主因是 FinLab 內建價格資料通常比 repo 內的 CSV 多一兩個交易日，未平倉部位的
+評價日不同。
+
 ### 參數預設組與敏感度測試
 
 ```bash
@@ -193,6 +229,7 @@ scripts/
   current_plan.py  印出目前這一輪的計畫與現況
   grid_search.py   648,000 組參數搜尋 + 邊際分析
   walk_forward.py  前半段選參數、後半段驗收的樣本外測試
+  finlab_report.py FinLab sim() 回測，供 report.display() 使用
 docs/strategy.md   完整策略說明
 tests/             單元測試
 ```
