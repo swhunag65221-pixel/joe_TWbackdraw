@@ -13,19 +13,22 @@ import argparse
 
 from .backtest import align_etf, run_backtest
 from .bars import load_csv
-from .config import DEFAULT_CONFIG, EntryConfig, SetupConfig, SizingConfig, StrategyConfig
+from .config import (
+    DEFAULT_CONFIG, PRESETS, EntryConfig, SetupConfig, SizingConfig, StrategyConfig,
+)
 from .plan import build_plan
 from .setup import detect_setups, scan_episodes
 from .status import render_status
 
 
 def _config_from_args(args: argparse.Namespace) -> StrategyConfig:
-    cfg = DEFAULT_CONFIG
+    cfg = PRESETS.get(getattr(args, "preset", None) or "post", DEFAULT_CONFIG)
     setup = SetupConfig(
         min_drawdown=getattr(args, "min_drawdown", None) or cfg.setup.min_drawdown,
         repair_fraction=getattr(args, "repair", None) or cfg.setup.repair_fraction,
         max_repair_bars=getattr(args, "max_bars", None) or cfg.setup.max_repair_bars,
         setup_expiry_bars=cfg.setup.setup_expiry_bars,
+        reanchor_on_expiry=cfg.setup.reanchor_on_expiry,
     )
     sizing = SizingConfig(
         risk_per_trade=getattr(args, "risk", None) or cfg.sizing.risk_per_trade,
@@ -124,6 +127,9 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--max-bars", type=int, help="補回的最大交易日數，預設 15")
     common.add_argument("--risk", type=float, help="單筆風險預算，預設 0.08")
     common.add_argument("--base-weight", type=float, help="底倉佔目標部位比例，預設 0.40")
+    common.add_argument("--preset", choices=sorted(PRESETS),
+                        help="參數預設組：post（貼文原意，預設）/ tuned（報酬最佳）"
+                             "/ balanced（調校訊號 + MA40 出場）/ winrate（勝率最高，無停損）")
 
     sp = sub.add_parser("plan", parents=[common], help="產生操作計畫")
     sp.add_argument("--peak", type=float, required=True, help="前波高點")

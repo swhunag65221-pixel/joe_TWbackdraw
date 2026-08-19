@@ -11,7 +11,9 @@ from datetime import date, timedelta
 from tw_backdraw import build_levels, build_plan, detect_setups
 from tw_backdraw.setup import scan_episodes
 from tw_backdraw.bars import Bar
-from tw_backdraw.config import DEFAULT_CONFIG, ExitConfig, SetupConfig, StrategyConfig
+from tw_backdraw.config import (
+    DEFAULT_CONFIG, PRESETS, ExitConfig, SetupConfig, StrategyConfig,
+)
 from tw_backdraw.engine import Engine, breakout_stop, moving_average, position_size
 from tw_backdraw.leveraged import synth_leveraged_path
 from tw_backdraw.status import render_status
@@ -277,6 +279,38 @@ class TestEngine(unittest.TestCase):
         loose = SetupConfig(min_drawdown=0.10, repair_fraction=0.75, max_repair_bars=35)
         self.assertEqual(detect_setups(series(closes), strict), [])
         self.assertEqual(len(detect_setups(series(closes), loose)), 1)
+
+
+class TestPresets(unittest.TestCase):
+    def test_default_is_the_post_faithful_preset(self):
+        self.assertEqual(PRESETS["post"], DEFAULT_CONFIG)
+
+    def test_every_preset_runs(self):
+        base = TROUGH + 0.80 * 7809
+        closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
+                  + ramp(base, PEAK * 1.2, 30) + ramp(PEAK * 1.2, PEAK * 0.95, 20))
+        bars = series(closes)
+        for name, cfg in PRESETS.items():
+            with self.subTest(preset=name):
+                etf = synth_leveraged_path(bars, cfg.cost, cfg.sizing.leverage)
+                Engine(cfg).run(bars, etf)          # 不應拋錯
+
+    def test_winrate_preset_has_its_stops_disabled(self):
+        """勝率最高的那組是靠關掉風控換來的，這一點必須留在程式碼裡看得見。"""
+        cfg = PRESETS["winrate"]
+        self.assertEqual(cfg.exit.warn_derisk_fraction, 0.0)
+        self.assertFalse(cfg.exit.hard_stop_at_trough)
+
+    def test_tuned_and_balanced_keep_their_stops(self):
+        for name in ("tuned", "balanced"):
+            with self.subTest(preset=name):
+                cfg = PRESETS[name]
+                self.assertGreater(cfg.exit.warn_derisk_fraction, 0.0)
+                self.assertTrue(cfg.exit.hard_stop_at_trough)
+
+    def test_balanced_uses_the_ma_ratchet(self):
+        self.assertEqual(PRESETS["balanced"].exit.exit_mode, "ma_ratchet")
+        self.assertEqual(PRESETS["balanced"].exit.ma_period, 40)
 
 
 class TestPlan(unittest.TestCase):

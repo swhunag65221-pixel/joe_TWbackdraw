@@ -19,6 +19,7 @@
        跌破谷底 → 清倉
 出場   前高不賣（「離前高很近，本身不是賣出的理由」）
        創高後啟動移動停利：自波段最高收盤回檔 8% → 出清
+       （或改用 MA 棘輪：出場線 = max(前高, MA)，見 --preset balanced）
 ```
 
 台股當前實例（`P=47742`、`T=39933`）：
@@ -136,11 +137,23 @@ python3 -m tw_backdraw status --csv data/taiex.csv --etf-csv data/00631L.csv --c
 
 `scripts/current_plan.py --capital 1000000` 會一次印出完整計畫加上這份現況。
 
-### 調參數做敏感度測試
+### 參數預設組與敏感度測試
 
 ```bash
+python3 -m tw_backdraw backtest --csv data/taiex.csv --preset tuned
 python3 -m tw_backdraw backtest --csv data/taiex.csv --max-bars 25 --repair 0.60 --risk 0.05
 ```
+
+| `--preset` | 訊號 | 出場 | 筆數 | 勝率 | 總報酬 | 最大回檔 |
+|---|---|---|---|---|---|---|
+| **`post`（預設）** | 15 日 / 75% | trail 8% | 8 | 50% | +31.4% | −20.4% |
+| `tuned` | 30 日 / 60% | trail 8% | 21 | 52% | +5,151% | −44.1% |
+| `balanced` | 30 日 / 60% | MA40 棘輪 | 21 | 67% | +459.1% | −35.3% |
+| `winrate` | 30 日 / 60% | MA40，**無停損** | 12 | 92% | +33.0% | −35.0% |
+
+`winrate` 是 648,000 組裡勝率最高的一組 —— 它是**靠關掉兩道停損**換來的，
+總報酬只有 +33%。列出來是為了讓「最大化勝率」的後果可以被重現，不是建議值。
+完整的 grid search、邊際分析與樣本外驗證見 [docs/strategy.md §11](docs/strategy.md)。
 
 所有參數集中在 [`tw_backdraw/config.py`](tw_backdraw/config.py)。
 
@@ -164,6 +177,8 @@ scripts/
   fetch_finlab.py  FinLab 日線抓取（主要）
   fetch_twse.py    證交所日線抓取（備援，不需帳號）
   current_plan.py  印出目前這一輪的計畫與現況
+  grid_search.py   648,000 組參數搜尋 + 邊際分析
+  walk_forward.py  前半段選參數、後半段驗收的樣本外測試
 docs/strategy.md   完整策略說明
 tests/             單元測試
 ```

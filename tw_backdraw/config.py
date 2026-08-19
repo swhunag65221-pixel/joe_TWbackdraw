@@ -136,3 +136,50 @@ class StrategyConfig:
 
 
 DEFAULT_CONFIG = StrategyConfig()
+
+
+# ---------------------------------------------------------------------------
+# 預設組（PRESETS）
+#
+# 以下三組是 648,000 組 grid search + 樣本外驗證（scripts/grid_search.py、
+# scripts/walk_forward.py）的產物。`post` 仍然是預設值 —— 調校版在樣本內漂亮，
+# 但它是從同一份 21 筆交易挑出來的，換組合前請先讀 docs/strategy.md §11。
+# ---------------------------------------------------------------------------
+
+#: 忠於貼文的原始設定（15 日 / 補回 75%），本專案的預設
+POST_CONFIG = StrategyConfig()
+
+#: 報酬÷回檔最佳區域的參數眾數。放寬訊號定義（30 日 / 補回 60%）、
+#: 滿倉底倉、警戒線全數出場。樣本內 21 筆、勝率 52%、總報酬 +5151%、回檔 -44%。
+TUNED_CONFIG = StrategyConfig(
+    setup=SetupConfig(min_drawdown=0.10, repair_fraction=0.60, max_repair_bars=30),
+    levels=LevelConfig(warn_line_ratio=0.500),
+    entry=EntryConfig(base_weight=1.0, fill_timeout_bars=20),
+    exit=ExitConfig(warn_derisk_fraction=1.0, exit_mode="trail", trail_drawdown=0.08),
+)
+
+#: 調校過的訊號 + MA40 棘輪出場。用報酬換勝率與較小的回檔：
+#: 樣本內 21 筆、勝率 67%、總報酬 +459%、回檔 -35%。
+BALANCED_CONFIG = StrategyConfig(
+    setup=SetupConfig(min_drawdown=0.10, repair_fraction=0.60, max_repair_bars=30),
+    levels=LevelConfig(warn_line_ratio=0.500),
+    entry=EntryConfig(base_weight=1.0, fill_timeout_bars=20),
+    exit=ExitConfig(warn_derisk_fraction=1.0, exit_mode="ma_ratchet", ma_period=40),
+)
+
+#: 全網格勝率最高的一組（92%，11/12）。**它是靠關掉兩道停損換來的**，
+#: 總報酬只有 +33%、最大回檔 -35%。列在這裡是為了讓「最大化勝率」的
+#: 後果可以被重現，不是建議值。
+WINRATE_CONFIG = StrategyConfig(
+    setup=SetupConfig(min_drawdown=0.13, repair_fraction=0.60, max_repair_bars=30),
+    entry=EntryConfig(base_weight=1.0, fill_timeout_bars=40),
+    exit=ExitConfig(warn_derisk_fraction=0.0, hard_stop_at_trough=False,
+                    exit_mode="ma_ratchet", ma_period=40),
+)
+
+PRESETS: dict[str, StrategyConfig] = {
+    "post": POST_CONFIG,
+    "tuned": TUNED_CONFIG,
+    "balanced": BALANCED_CONFIG,
+    "winrate": WINRATE_CONFIG,
+}
