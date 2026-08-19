@@ -70,9 +70,18 @@ class ExitConfig:
     hard_stop_at_trough: bool = True
     # 觸及前高後先落袋的比例。
     # 預設 0：「離前高很近，本身不是賣出的理由」——前高只是統計上的高機率目標，
-    # 不是出場訊號；獲利全部交給移動停利處理。設 1/3 可改回分批落袋。
+    # 不是出場訊號；獲利全部交給停利機制處理。設 1/3 可改回分批落袋。
     target_take_fraction: float = 0.0
-    # 剩餘部位改用移動停利：自最高收盤回檔多少（以指數計）
+
+    # 創高之後用哪一種停利：
+    #   "trail"       自創高後最高收盤回檔 trail_drawdown → 出場
+    #   "ma_ratchet"  停利價 = max(前高, MA)。創高後先把前高當出場線，
+    #                 等 MA 爬過前高，就改看 MA 跌破 —— 均線只會把出場線往上推。
+    #   "both"        兩者取較緊（較高）的那一條
+    exit_mode: str = "trail"
+    # ma_ratchet / both 使用的均線天期（以加權指數收盤計）
+    ma_period: int = 20
+    # trail / both 使用的回檔幅度（以指數計）
     trail_drawdown: float = 0.08
 
 

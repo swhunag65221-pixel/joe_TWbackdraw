@@ -12,7 +12,7 @@ from tw_backdraw import build_levels, build_plan, detect_setups
 from tw_backdraw.setup import scan_episodes
 from tw_backdraw.bars import Bar
 from tw_backdraw.config import DEFAULT_CONFIG, ExitConfig, SetupConfig, StrategyConfig
-from tw_backdraw.engine import Engine, position_size
+from tw_backdraw.engine import Engine, breakout_stop, moving_average, position_size
 from tw_backdraw.leveraged import synth_leveraged_path
 from tw_backdraw.status import render_status
 
@@ -289,6 +289,63 @@ class TestPlan(unittest.TestCase):
         text = build_plan(PEAK, TROUGH, 46200, DEFAULT_CONFIG).render()
         for token in ("47,742", "43,838", "42,916", "39,933"):
             self.assertIn(token, text)
+
+
+class TestMovingAverageExit(unittest.TestCase):
+    def test_moving_average_warms_up(self):
+        bars = series([10.0, 20.0, 30.0, 40.0])
+        ma = moving_average(bars, 3)
+        self.assertEqual(ma[:2], [None, None])
+        self.assertAlmostEqual(ma[2], 20.0)
+        self.assertAlmostEqual(ma[3], 30.0)
+
+    def _cfg(self, **kw):
+        return StrategyConfig(setup=DEFAULT_CONFIG.setup, levels=DEFAULT_CONFIG.levels,
+                              entry=DEFAULT_CONFIG.entry, exit=ExitConfig(**kw),
+                              sizing=DEFAULT_CONFIG.sizing, cost=DEFAULT_CONFIG.cost)
+
+    def test_ratchet_uses_prior_high_until_the_ma_catches_up(self):
+        cfg = self._cfg(exit_mode="ma_ratchet", ma_period=20)
+        # MA 還在前高下方 → 出場線是前高本身
+        stop, why = breakout_stop(cfg, prior_high=100.0, peak_since_breakout=130.0, ma=90.0)
+        self.assertAlmostEqual(stop, 100.0)
+        self.assertIn("前高", why)
+        # MA 爬過前高 → 改看 MA
+        stop, why = breakout_stop(cfg, prior_high=100.0, peak_since_breakout=130.0, ma=115.0)
+        self.assertAlmostEqual(stop, 115.0)
+        self.assertIn("MA20", why)
+
+    def test_ratchet_before_warmup_falls_back_to_prior_high(self):
+        cfg = self._cfg(exit_mode="ma_ratchet")
+        stop, _ = breakout_stop(cfg, prior_high=100.0, peak_since_breakout=130.0, ma=None)
+        self.assertAlmostEqual(stop, 100.0)
+
+    def test_both_mode_takes_the_tighter_stop(self):
+        cfg = self._cfg(exit_mode="both", ma_period=40, trail_drawdown=0.08)
+        # trail = 130×0.92 = 119.6 > MA 115 → 取 trail
+        stop, why = breakout_stop(cfg, prior_high=100.0, peak_since_breakout=130.0, ma=115.0)
+        self.assertAlmostEqual(stop, 119.6)
+        self.assertIn("移動停利", why)
+        # MA 125 > trail 119.6 → 取 MA
+        stop, why = breakout_stop(cfg, prior_high=100.0, peak_since_breakout=130.0, ma=125.0)
+        self.assertAlmostEqual(stop, 125.0)
+        self.assertIn("MA40", why)
+
+    def test_unknown_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            breakout_stop(self._cfg(exit_mode="nope"), 100.0, 130.0, 110.0)
+
+    def test_ma_exit_fires_in_a_full_run(self):
+        base = TROUGH + 0.80 * 7809
+        top = PEAK * 1.30
+        closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
+                  + ramp(base, top, 60) + ramp(top, top * 0.80, 25) + [top * 0.79] * 3)
+        bars = series(closes)
+        cfg = self._cfg(exit_mode="ma_ratchet", ma_period=20)
+        etf = synth_leveraged_path(bars, cfg.cost, 2.0)
+        res = Engine(cfg).run(bars, etf)
+        sells = [f.reason for f in res.trades[0].fills if f.side == "sell"]
+        self.assertTrue(any("MA20" in r for r in sells), sells)
 
 
 class TestStatus(unittest.TestCase):

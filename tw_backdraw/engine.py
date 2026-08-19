@@ -90,6 +90,41 @@ def position_size(entry_index: float, levels: Levels, cfg: StrategyConfig) -> fl
     return min(cfg.sizing.max_weight, cfg.sizing.risk_per_trade / expected_loss)
 
 
+def moving_average(bars: list[Bar], period: int) -> list[float | None]:
+    """加權指數收盤的簡單移動平均；資料不足時為 None。"""
+    out: list[float | None] = []
+    total = 0.0
+    for i, b in enumerate(bars):
+        total += b.close
+        if i >= period:
+            total -= bars[i - period].close
+        out.append(total / period if i >= period - 1 else None)
+    return out
+
+
+def breakout_stop(cfg: StrategyConfig, prior_high: float, peak_since_breakout: float,
+                  ma: float | None) -> tuple[float, str]:
+    """創高之後的出場線，回傳 (價位, 說明)。"""
+    mode = cfg.exit.exit_mode
+    trail = peak_since_breakout * (1 - cfg.exit.trail_drawdown)
+
+    if mode == "trail":
+        return trail, f"移動停利：自 {peak_since_breakout:,.0f} 回檔 {cfg.exit.trail_drawdown:.0%}"
+
+    # 均線棘輪：先以前高為出場線，等 MA 爬過前高才改看 MA
+    if ma is None or ma <= prior_high:
+        ratchet, why = prior_high, f"跌破前高 {prior_high:,.0f}（MA{cfg.exit.ma_period} 尚未站上）"
+    else:
+        ratchet, why = ma, f"跌破 MA{cfg.exit.ma_period} {ma:,.0f}"
+
+    if mode == "ma_ratchet":
+        return ratchet, why
+    if mode == "both":
+        return ((trail, f"移動停利：自 {peak_since_breakout:,.0f} 回檔 {cfg.exit.trail_drawdown:.0%}")
+                if trail > ratchet else (ratchet, why))
+    raise ValueError(f"未知的 exit_mode: {mode!r}")
+
+
 def _risk_scale(entry_index: float, fill_index: float, levels: Levels,
                 cfg: StrategyConfig) -> float:
     """往上加碼時的權重縮放。
@@ -116,6 +151,8 @@ class Engine:
 
         setups = detect_setups(bars, cfg.setup)
         by_trigger = {s.trigger_index: s for s in setups}
+        mas = (moving_average(bars, cfg.exit.ma_period)
+               if cfg.exit.exit_mode in ("ma_ratchet", "both") else [None] * len(bars))
 
         cash, units = 1.0, 0.0
         equity_curve: list[tuple[date, float]] = []
@@ -226,13 +263,12 @@ class Engine:
                         pending.append(("sell", cfg.exit.target_take_fraction,
                                         f"目標達陣：回到前高 {lv.peak:,.0f}"))
 
-                    # (c) 創高之後，出場全部交給移動停利
-                    if (trade.reached_prior_high and units > 0
-                            and c <= peak_since_breakout * (1 - cfg.exit.trail_drawdown)):
-                        pending.append(("sell", 1.0,
-                                        f"移動停利：自 {peak_since_breakout:,.0f} 回檔 "
-                                        f"{cfg.exit.trail_drawdown:.0%}"))
-                        trade.exit_reason = "trail"
+                    # (c) 創高之後，出場全部交給停利機制
+                    if trade.reached_prior_high and units > 0:
+                        stop, why = breakout_stop(cfg, lv.peak, peak_since_breakout, mas[i])
+                        if c < stop:
+                            pending.append(("sell", 1.0, why))
+                            trade.exit_reason = "trail"
 
                     # (d) 減碼後收復主防線 → 補回一次
                     if derisked and not reloaded and adds_allowed and c >= lv.half_line and units > 0:
