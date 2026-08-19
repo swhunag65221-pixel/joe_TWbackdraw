@@ -66,6 +66,12 @@ MARKETS = {
     "us": dict(symbol="UPRO", index_csv="gspc.csv", index_name="S&P 500",
                leverage=3.0, fee=0.0, tax=0.0, carry=0.0091,
                finlab_market="US_STOCK"),
+    # TQQQ 追蹤 NASDAQ-100，但 FinLab 的 world_index 只有綜合指數 ^IXIC。
+    # 兩者日報酬相關 0.9897，且 TQQQ 對 ^IXIC 的實際 beta 為 2.983
+    # （對 QQQ 是 2.957），用 ^IXIC 當訊號源是可接受的替代。
+    "nq": dict(symbol="TQQQ", index_csv="ixic.csv", index_name="NASDAQ 綜合指數",
+               leverage=3.0, fee=0.0, tax=0.0, carry=0.0095,
+               finlab_market="US_STOCK"),
 }
 SYMBOL = MARKETS["tw"]["symbol"]      # 相容舊呼叫
 
@@ -124,8 +130,10 @@ def load_bars(index_csv: str | Path | None = None,
         if not f.exists():
             raise SystemExit(
                 f"找不到 {f}。請先執行："
-                + ("python3 scripts/fetch_finlab.py --us" if market == "us"
-                   else "python3 scripts/fetch_finlab.py"))
+                + {"us": "python3 scripts/fetch_finlab.py --us",
+                   "nq": "python3 scripts/fetch_finlab.py --us "
+                         "--us-index '^IXIC' --us-etf TQQQ",
+                   }.get(market, "python3 scripts/fetch_finlab.py"))
     return align_etf(load_csv(index_csv), load_csv(etf_csv))
 
 
@@ -293,8 +301,8 @@ def buy_and_hold_metrics(symbol: str, market: str = "us",
     login_finlab()
     from finlab import data
 
-    src = ("us_fund_price:adj_close" if market == "us" and symbol != "^GSPC"
-           else "world_index:adj_close" if symbol.startswith("^")
+    src = ("world_index:adj_close" if symbol.startswith("^")
+           else "us_fund_price:adj_close" if market in ("us", "nq")
            else "etl:adj_close")
     px = data.get(src)[symbol].dropna()
     if start:
@@ -337,7 +345,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="用 FinLab sim 回測本策略")
     ap.add_argument("--preset", default="tuned", choices=sorted(PRESETS))
     ap.add_argument("--market", default="tw", choices=sorted(MARKETS),
-                    help="tw = 加權指數/00631L（2x）；us = S&P500/UPRO（3x）")
+                    help="tw = 加權指數/00631L（2x）；us = S&P500/UPRO（3x）；"
+                        "nq = NASDAQ/TQQQ（3x）")
     ap.add_argument("--start", help="回測起日 YYYY-MM-DD")
     ap.add_argument("--end", help="回測迄日 YYYY-MM-DD")
     ap.add_argument("--display", action="store_true", help="呼叫 report.display()")
@@ -354,7 +363,8 @@ def main() -> int:
         pos = pos
         lo, hi = pos.index[0], pos.index[-1]
         rows = [(f"策略 {args.preset}（{m['symbol']}）", key_metrics(rep))]
-        bench = [m["symbol"]] + (["SPY", "^GSPC"] if args.market == "us" else ["0050"])
+        bench = [m["symbol"]] + {"us": ["SPY", "^GSPC"], "nq": ["QQQ", "^IXIC"]}.get(
+            args.market, ["0050"])
         for b in bench:
             try:
                 rows.append((f"買進持有 {b}", buy_and_hold_metrics(b, args.market, lo, hi)))
