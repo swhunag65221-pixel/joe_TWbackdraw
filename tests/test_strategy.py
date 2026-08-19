@@ -10,9 +10,10 @@ from datetime import date, timedelta
 
 from tw_backdraw import build_levels, build_plan, detect_setups
 from tw_backdraw.bars import Bar
-from tw_backdraw.config import DEFAULT_CONFIG, SetupConfig, StrategyConfig
+from tw_backdraw.config import DEFAULT_CONFIG, ExitConfig, SetupConfig, StrategyConfig
 from tw_backdraw.engine import Engine, position_size
 from tw_backdraw.leveraged import synth_leveraged_path
+from tw_backdraw.status import render_status
 
 # 貼文中的台股實例
 PEAK, TROUGH = 47742.0, 39933.0
@@ -162,18 +163,43 @@ class TestEngine(unittest.TestCase):
         self.assertTrue(any("劇本失效" in r for r in sells), sells)   # 再於谷底清倉
         self.assertLess(t.ret, 0.0)
 
-    def test_take_profit_at_prior_high_then_trail(self):
+    def _breakout_series(self) -> list[float]:
         base = TROUGH + 0.80 * 7809
-        top = PEAK * 1.10
-        closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
-                  + ramp(base, top, 20) + ramp(top, top * 0.90, 6) + [top * 0.89] * 2)
-        _, res = self._run(closes)
+        top = PEAK * 1.25
+        # 訊號 → 創高 → 續漲兩成 → 緩跌觸發移動停利
+        return ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12)
+                + ramp(base, top, 25) + ramp(top, top * 0.88, 12) + [top * 0.87] * 2)
+
+    def test_prior_high_is_not_a_sell_signal_by_default(self):
+        """預設不在前高賣出，出場全部交給移動停利。"""
+        _, res = self._run(self._breakout_series())
         t = res.trades[0]
         self.assertTrue(t.reached_prior_high)
         sells = [f.reason for f in t.fills if f.side == "sell"]
-        self.assertTrue(any("目標達陣" in r for r in sells), sells)
+        self.assertFalse(any("目標達陣" in r for r in sells), sells)
         self.assertTrue(any("移動停利" in r for r in sells), sells)
         self.assertGreater(t.ret, 0.0)
+
+    def test_take_profit_at_prior_high_when_enabled(self):
+        cfg = StrategyConfig(setup=DEFAULT_CONFIG.setup, levels=DEFAULT_CONFIG.levels,
+                             entry=DEFAULT_CONFIG.entry,
+                             exit=ExitConfig(target_take_fraction=1 / 3),
+                             sizing=DEFAULT_CONFIG.sizing, cost=DEFAULT_CONFIG.cost)
+        _, res = self._run(self._breakout_series(), cfg)
+        sells = [f.reason for f in res.trades[0].fills if f.side == "sell"]
+        self.assertTrue(any("目標達陣" in r for r in sells), sells)
+        self.assertTrue(any("移動停利" in r for r in sells), sells)
+
+    def test_breakout_fill_is_risk_scaled_down(self):
+        """在更高的價位補倉，權重必須按停損距離縮小，才不會超出風險預算。"""
+        _, res = self._run(self._breakout_series())
+        t = res.trades[0]
+        buys = [f for f in t.fills if f.side == "buy"]
+        breakout = [f for f in buys if "突破補齊" in f.reason]
+        self.assertTrue(breakout, [f.reason for f in buys])
+        # 加碼梯名目權重是目標的 30%，實際成交必須更小
+        self.assertLess(breakout[0].weight, 0.30 * t.target_weight)
+        self.assertGreater(breakout[0].weight, 0.0)
 
     def test_derisk_then_reload_when_the_main_line_is_reclaimed(self):
         base = TROUGH + 0.80 * 7809
@@ -221,6 +247,27 @@ class TestPlan(unittest.TestCase):
         text = build_plan(PEAK, TROUGH, 46200, DEFAULT_CONFIG).render()
         for token in ("47,742", "43,838", "42,916", "39,933"):
             self.assertIn(token, text)
+
+
+class TestStatus(unittest.TestCase):
+    def test_open_position_status_lists_the_next_triggers(self):
+        base = TROUGH + 0.80 * 7809
+        closes = ([PEAK] + ramp(PEAK, TROUGH, 20) + ramp(TROUGH, base, 12) + [base * 0.99] * 3)
+        bars = series(closes)
+        etf = synth_leveraged_path(bars, DEFAULT_CONFIG.cost, 2.0)
+        res = Engine(DEFAULT_CONFIG).run(bars, etf)
+        text = render_status(res, bars, DEFAULT_CONFIG, capital=1_000_000)
+        self.assertIn("底倉", text)
+        self.assertIn("42,916", text)      # 警戒線
+        self.assertIn("39,933", text)      # 失效線
+        self.assertIn("回檔 3%", text)      # 尚未成交的加碼梯
+
+    def test_status_without_a_position(self):
+        bars = series([PEAK * (1 + 0.001 * i) for i in range(30)])
+        etf = synth_leveraged_path(bars, DEFAULT_CONFIG.cost, 2.0)
+        res = Engine(DEFAULT_CONFIG).run(bars, etf)
+        text = render_status(res, bars, DEFAULT_CONFIG)
+        self.assertIn("沒有進行中的部位", text)
 
 
 class TestLeveraged(unittest.TestCase):

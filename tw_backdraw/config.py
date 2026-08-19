@@ -49,9 +49,11 @@ class EntryConfig:
     pullback_ladder: tuple[tuple[float, float], ...] = ((0.03, 0.30), (0.05, 0.30))
     # 幾個交易日內若都沒等到回檔，就以市價補齊剩餘部位（不參與才是最大風險）
     fill_timeout_bars: int = 20
-    # 突破前高後是否補齊剩餘部位。
-    # 預設 False：突破即視為劇本完成，改為分批獲利 + 移動停利，不再往上追。
-    breakout_fills_remainder: bool = False
+    # 突破前高後補齊剩餘部位。
+    # 預設 True：訊號觸發時距前高通常只剩 3~4%，等不到回檔梯就先創高是常態，
+    # 若此時取消加碼，實際部署會長期停在底倉水位（實測平均僅 24%）。
+    # 往上買的單位風險較高，引擎會按停損距離自動縮小這一段的權重。
+    breakout_fills_remainder: bool = True
 
 
 @dataclass(frozen=True)
@@ -62,8 +64,10 @@ class ExitConfig:
     warn_derisk_fraction: float = 0.50
     # 收盤跌破谷底 → 全出（貼文中 11% 的失敗案例都是大熊市開場）
     hard_stop_at_trough: bool = True
-    # 觸及前高後先落袋的比例
-    target_take_fraction: float = 1.0 / 3.0
+    # 觸及前高後先落袋的比例。
+    # 預設 0：「離前高很近，本身不是賣出的理由」——前高只是統計上的高機率目標，
+    # 不是出場訊號；獲利全部交給移動停利處理。設 1/3 可改回分批落袋。
+    target_take_fraction: float = 0.0
     # 剩餘部位改用移動停利：自最高收盤回檔多少（以指數計）
     trail_drawdown: float = 0.08
 

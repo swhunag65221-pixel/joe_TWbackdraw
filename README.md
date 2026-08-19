@@ -12,18 +12,20 @@
 
 ```
 訊號   自高點回檔 ≥10% 後，從谷底起 ≤15 個交易日內收盤補回 ≥75% 的跌幅
-進場   底倉 40% 立刻買（不等回檔）；−3% 加 30%；−5% 加 30%；20 日沒回檔就補齊
+進場   底倉 40% 立刻買（不等回檔）；−3% 加 30%；−5% 加 30%
+       突破前高或滿 20 日仍沒回檔 → 補齊剩餘部位（往上買會按停損距離縮量）
 防守   跌破 50% 回補位 → 停止加碼
        跌破 38.2% 回補位 → 減碼一半
        跌破谷底 → 清倉
-目標   回到前波高點 → 賣 1/3，其餘用「自高點回檔 8%」移動停利
+出場   前高不賣（「離前高很近，本身不是賣出的理由」）
+       創高後啟動移動停利：自波段最高收盤回檔 8% → 出清
 ```
 
 台股當前實例（`P=47742`、`T=39933`）：
 
 | 價位 | 指數 | 動作 |
 |---|---|---|
-| 前波高點 | 47,742 | 賣 1/3，其餘轉移動停利 |
+| 前波高點 | 47,742 | 不賣，啟動 8% 移動停利 |
 | 主防線（50%） | 43,838 | 跌破 → 停止加碼 |
 | 警戒線（38.2%） | 42,916 | 跌破 → 減碼一半 |
 | 失效線 | 39,933 | 跌破 → 清倉 |
@@ -32,7 +34,9 @@
 
 ## 使用方式
 
-只用 Python 標準函式庫，不需要安裝任何套件（Python 3.10+）。
+策略本體（`tw_backdraw/`、CLI、回測、測試）**只用 Python 標準函式庫**，Python 3.10+ 即可跑。
+只有 `scripts/fetch_finlab.py` 需要額外安裝 `finlab`（見下方「抓資料」）。
+`data/` 內已附上抓好的日線，所以 clone 下來就能直接回測。
 
 ### 產生操作計畫
 
@@ -55,29 +59,78 @@ python3 -m tw_backdraw plan --peak 47742 --trough 39933 --now 46200 --capital 10
   時間補齊        剩餘                    訊號後 20 個交易日仍未觸發回檔梯 → 市價補齊
 ```
 
-### 抓真實資料 → 掃描歷史訊號 → 回測
+### 抓資料（FinLab）
+
+主要資料來源是 **FinLab**，需要 API token（從環境變數 `Finlab_API_token` 讀取）：
 
 ```bash
-# 證交所加權指數日線，最早到 1999-01-05（逐月抓取並快取於 data/raw/）
+python3 -m venv .venv && .venv/bin/pip install finlab
+.venv/bin/python scripts/fetch_finlab.py          # 加權指數 + 00631L 一次抓完
+```
+
+抓下來的是：
+
+| 檔案 | 來源資料集 | 範圍 |
+|---|---|---|
+| `data/taiex.csv` | `taiex_total_index:{開盤,最高,最低,收盤}指數` | 1999-01-05 起，6,821 根 |
+| `data/00631L.csv` | `price:{開盤,最高,最低,收盤}價` | 2014-10-31 起，2,873 根 |
+
+> `taiex_total_index` 的命名容易誤會，實際內容是**發行量加權股價指數**（價格指數，
+> 非含息報酬指數），已逐筆與證交所 MI_5MINS_HIST 核對相符。
+
+沒有 FinLab 帳號時，`scripts/fetch_twse.py` 是不需帳號的備援（直接爬證交所，逐月抓、較慢）：
+
+```bash
 python3 scripts/fetch_twse.py taiex --start 199901 --out data/taiex.csv
-
-# 00631L 實際日線（2014-10 掛牌），可選
 python3 scripts/fetch_twse.py stock --stock 00631L --start 201410 --out data/00631L.csv
+```
 
-python3 -m tw_backdraw scan --csv data/taiex.csv
+### 掃描歷史訊號 → 回測
+
+```bash
+python3 -m tw_backdraw scan     --csv data/taiex.csv
 python3 -m tw_backdraw backtest --csv data/taiex.csv -v
-python3 -m tw_backdraw backtest --csv data/taiex.csv --etf-csv data/00631L.csv
+python3 -m tw_backdraw backtest --csv data/taiex.csv --etf-csv data/00631L.csv -v
 ```
 
 沒指定 `--etf-csv` 時，會用指數日報酬合成一條 2 倍槓桿淨值（含內扣與波動耗損）來回測。
 
-### 目前這一輪
+**1999–2026 全期只觸發過 5 次訊號**，命中率 3/5、單筆平均 +5.3%、權益總報酬 +25.1%、
+最大回檔 −19.3%。唯一一次真正失敗的是 2000-03（網路泡沫頭部），兩段式停損把它控制在 −6.9%。
+完整結果與檢討見 [docs/strategy.md §9](docs/strategy.md)。
+
+> 5 次樣本推不出統計結論。這套策略的依據是貼文那 174 次跨國樣本，
+> 台股回測只能確認「規則寫對了、執行得動」，不能用來驗證勝率。
+
+### 目前部位該做什麼
 
 ```bash
-python3 scripts/current_plan.py --capital 1000000
+python3 -m tw_backdraw status --csv data/taiex.csv --etf-csv data/00631L.csv --capital 1000000
 ```
 
-有 `data/taiex.csv` 就自動抓最新一次訊號與最新收盤，否則退回貼文中的實例。
+```
+訊號        2026-07-30 谷底 39,933（自 2026-06-22 高點 47,742 回檔 16.4%），
+            10 個交易日補回 78%，2026-08-13 觸發訊號 @ 46,021
+目標水位    40.0%（約 400,464 元）
+已建立      16.0%（約 160,186 元）　＝ 目標的 40%
+
+目前分區    healthy　劇本正常 —— 回檔就是加碼機會
+距前高      -5.1%　距主防線 +3.4%　距警戒線 +5.6%　距失效線 +13.5%
+
+下一步（收盤價判定，次一交易日執行）
+  買  12.0%（約 120,139 元）　收盤 ≤ 44,641（自波段高 46,021 回檔 3%，距現價 -1.5%）
+  買  12.0%（約 120,139 元）　收盤 ≤ 43,720（自波段高 46,021 回檔 5%，距現價 -3.5%）
+  買     剩餘　再過 17 個交易日仍未觸發回檔梯 → 市價補齊
+  買     剩餘　收盤 > 47,742（前高）→ 補齊，權重按停損距離縮放
+  賣     全部　創高後啟動移動停利（自最高收盤回檔 8%）
+  賣    50%　收盤 < 42,916（警戒線）
+  賣     全部　收盤 < 39,933（失效線）
+
+最壞情況    自現價跌到失效線 -11.9%，00631L 約 -24%；
+            依已建立的 16.0% 部位，權益衝擊約 -3.8%
+```
+
+`scripts/current_plan.py --capital 1000000` 會一次印出完整計畫加上這份現況。
 
 ### 調參數做敏感度測試
 
@@ -97,14 +150,16 @@ tw_backdraw/
   bars.py        日線資料結構與 CSV 讀取
   setup.py       「快速修復」訊號辨識
   levels.py      主防線 / 警戒線 / 失效線
-  engine.py      進出場狀態機（含部位大小計算）
+  engine.py      進出場狀態機（含部位大小計算、往上加碼的風險縮放）
   leveraged.py   00631L 的 2 倍槓桿淨值模型（含內扣與波動耗損）
   plan.py        訊號 → 可下單的操作計畫
+  status.py      進行中部位的現況與下一個觸發點
   backtest.py    回測與績效統計
-  cli.py         plan / scan / backtest 三個指令
+  cli.py         plan / scan / status / backtest 四個指令
 scripts/
-  fetch_twse.py    證交所日線抓取
-  current_plan.py  印出目前這一輪的計畫
+  fetch_finlab.py  FinLab 日線抓取（主要）
+  fetch_twse.py    證交所日線抓取（備援，不需帳號）
+  current_plan.py  印出目前這一輪的計畫與現況
 docs/strategy.md   完整策略說明
 tests/             單元測試
 ```

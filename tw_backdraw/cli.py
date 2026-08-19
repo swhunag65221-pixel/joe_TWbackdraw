@@ -2,6 +2,7 @@
 
     python -m tw_backdraw plan --peak 47742 --trough 39933 --now 46200 --capital 1000000
     python -m tw_backdraw scan --csv data/taiex.csv
+    python -m tw_backdraw status --csv data/taiex.csv --capital 1000000
     python -m tw_backdraw backtest --csv data/taiex.csv
 """
 
@@ -9,11 +10,12 @@ from __future__ import annotations
 
 import argparse
 
-from .backtest import run_backtest
+from .backtest import align_etf, run_backtest
 from .bars import load_csv
 from .config import DEFAULT_CONFIG, EntryConfig, SetupConfig, SizingConfig, StrategyConfig
 from .plan import build_plan
 from .setup import detect_setups
+from .status import render_status
 
 
 def _config_from_args(args: argparse.Namespace) -> StrategyConfig:
@@ -60,7 +62,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
 def cmd_backtest(args: argparse.Namespace) -> int:
     cfg = _config_from_args(args)
     bars = load_csv(args.csv)
-    etf = [b.close for b in load_csv(args.etf_csv)] if args.etf_csv else None
+    etf = None
+    if args.etf_csv:
+        bars, etf = align_etf(bars, load_csv(args.etf_csv))
+        print(f"使用 {args.etf_csv} 的真實 ETF 價格，回測期間縮至重疊區間")
     result, stats = run_backtest(bars, cfg, etf)
     print(f"回測期間 {bars[0].d} ~ {bars[-1].d}\n")
     print(stats.render())
@@ -71,6 +76,17 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             print(f"目標水位 {t.target_weight:.0%}｜結果 {t.ret:+.1%}｜出場原因 {t.exit_reason}")
             for f in t.fills:
                 print("   " + f.describe())
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    cfg = _config_from_args(args)
+    bars = load_csv(args.csv)
+    etf = None
+    if args.etf_csv:
+        bars, etf = align_etf(bars, load_csv(args.etf_csv))
+    result, _ = run_backtest(bars, cfg, etf)
+    print(render_status(result, bars, cfg, args.capital))
     return 0
 
 
@@ -95,6 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     ss = sub.add_parser("scan", parents=[common], help="掃描歷史訊號")
     ss.add_argument("--csv", required=True, help="指數日線 CSV（date,close 為必要欄位）")
     ss.set_defaults(func=cmd_scan)
+
+    st = sub.add_parser("status", parents=[common], help="目前部位現況與下一步")
+    st.add_argument("--csv", required=True, help="指數日線 CSV")
+    st.add_argument("--etf-csv", help="00631L 實際日線 CSV")
+    st.add_argument("--capital", type=float, help="投入本金，用來換算金額")
+    st.set_defaults(func=cmd_status)
 
     sb = sub.add_parser("backtest", parents=[common], help="回測")
     sb.add_argument("--csv", required=True, help="指數日線 CSV")

@@ -41,6 +41,19 @@ class Stats:
         ])
 
 
+def align_etf(bars: list[Bar], etf_bars: list[Bar]) -> tuple[list[Bar], list[float]]:
+    """把 ETF 日線對齊到指數日線，只保留兩邊都有交易的日子。
+
+    00631L 2014-10-31 才掛牌，比加權指數短很多；用真實 ETF 價格回測時，
+    回測期間會自動縮到重疊區間，而不是拿合成價去補前面那一段。
+    """
+    etf_by_date = {b.d: b.close for b in etf_bars}
+    kept = [(b, etf_by_date[b.d]) for b in bars if b.d in etf_by_date]
+    if not kept:
+        raise ValueError("指數與 ETF 日線沒有重疊的交易日")
+    return [b for b, _ in kept], [p for _, p in kept]
+
+
 def run_backtest(bars: list[Bar], cfg: StrategyConfig | None = None,
                  etf_prices: list[float] | None = None) -> tuple[Result, Stats]:
     cfg = cfg or DEFAULT_CONFIG

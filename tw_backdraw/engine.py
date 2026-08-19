@@ -45,6 +45,9 @@ class Trade:
     equity_at_exit: float = 1.0
     max_adverse_index: float = 0.0   # 進場後指數最大不利波動
     reached_prior_high: bool = False
+    swing_high: float = 0.0          # 訊號後的最高收盤（回檔梯的基準）
+    pending_ladder: list[tuple[float, float]] = field(default_factory=list)  # 尚未成交的加碼梯
+    bars_held: int = 0
 
     @property
     def ret(self) -> float:
@@ -85,6 +88,19 @@ def position_size(entry_index: float, levels: Levels, cfg: StrategyConfig) -> fl
     """
     expected_loss = cfg.sizing.leverage * _blended_stop_distance(entry_index, levels, cfg)
     return min(cfg.sizing.max_weight, cfg.sizing.risk_per_trade / expected_loss)
+
+
+def _risk_scale(entry_index: float, fill_index: float, levels: Levels,
+                cfg: StrategyConfig) -> float:
+    """往上加碼時的權重縮放。
+
+    部位大小是在訊號日算好的；若之後在更高的價位補倉，同樣的股數要承擔更長的
+    停損距離，實際風險就會超出預算。這裡按停損距離等比縮小，並限制在 1.0 以內
+    ——只會因為買貴而縮手，不會因為買便宜而放大部位。
+    """
+    base = _blended_stop_distance(entry_index, levels, cfg)
+    now = _blended_stop_distance(fill_index, levels, cfg)
+    return min(1.0, base / now) if now > 0 else 1.0
 
 
 class Engine:
@@ -165,6 +181,8 @@ class Engine:
                 lv, c = trade.levels, bar.close
                 swing_high = max(swing_high, c)
                 bars_since = i - trade.setup.trigger_index
+                trade.swing_high = swing_high
+                trade.bars_held = bars_since
                 if trade.fills:
                     trade.max_adverse_index = min(
                         trade.max_adverse_index, c / trade.fills[0].index_price - 1.0
@@ -193,24 +211,30 @@ class Engine:
                     breakout_filled = False
                     if trade.reached_prior_high and unfilled:
                         if cfg.entry.breakout_fills_remainder and adds_allowed:
+                            scale = _risk_scale(trade.setup.trigger_close, c, lv, cfg)
                             for _, w in unfilled:
-                                pending.append(("buy", w, f"突破補齊：站上前高 {lv.peak:,.0f}"))
+                                pending.append(("buy", w * scale,
+                                                f"突破補齊：站上前高 {lv.peak:,.0f}"
+                                                f"（風險縮放 {scale:.0%}）"))
                             breakout_filled = True
                         unfilled = []
 
-                    # (b) 回到前高：分批獲利了結，其餘轉移動停利
-                    if trade.reached_prior_high and not took_profit and units > 0 and not breakout_filled:
+                    # (b) 回到前高：可選的分批落袋（預設 0，前高不是賣出的理由）
+                    if (trade.reached_prior_high and not took_profit and units > 0
+                            and not breakout_filled and cfg.exit.target_take_fraction > 0):
                         took_profit = True
                         pending.append(("sell", cfg.exit.target_take_fraction,
                                         f"目標達陣：回到前高 {lv.peak:,.0f}"))
 
-                    if took_profit and units > 0 and c <= peak_since_breakout * (1 - cfg.exit.trail_drawdown):
+                    # (c) 創高之後，出場全部交給移動停利
+                    if (trade.reached_prior_high and units > 0
+                            and c <= peak_since_breakout * (1 - cfg.exit.trail_drawdown)):
                         pending.append(("sell", 1.0,
                                         f"移動停利：自 {peak_since_breakout:,.0f} 回檔 "
                                         f"{cfg.exit.trail_drawdown:.0%}"))
                         trade.exit_reason = "trail"
 
-                    # (c) 減碼後收復主防線 → 補回一次
+                    # (d) 減碼後收復主防線 → 補回一次
                     if derisked and not reloaded and adds_allowed and c >= lv.half_line and units > 0:
                         reloaded = True
                         # 解除減碼旗標：回補之後若再度跌破警戒線，還要能再減一次
@@ -218,7 +242,7 @@ class Engine:
                         pending.append(("buy", trade.filled_weight * cfg.exit.warn_derisk_fraction,
                                         f"回補：收復主防線 {lv.half_line:,.0f}"))
 
-                    # (d) 回檔加碼梯
+                    # (e) 回檔加碼梯
                     if unfilled and adds_allowed:
                         pullback = c / swing_high - 1.0
                         still: list[tuple[float, float]] = []
@@ -229,18 +253,23 @@ class Engine:
                                 still.append((thr, w))
                         unfilled = still
 
-                    # (e) 時間補齊：等不到回檔，不參與才是最大的風險
+                    # (f) 時間補齊：等不到回檔，不參與才是最大的風險
                     if unfilled and adds_allowed and bars_since >= cfg.entry.fill_timeout_bars:
+                        scale = _risk_scale(trade.setup.trigger_close, c, lv, cfg)
                         for _, w in unfilled:
-                            pending.append(("buy", w, f"時間補齊：{bars_since} 個交易日未見回檔"))
+                            pending.append(("buy", w * scale,
+                                            f"時間補齊：{bars_since} 個交易日未見回檔"
+                                            f"（風險縮放 {scale:.0%}）"))
                         unfilled = []
 
-                    # (f) 劇本過期
+                    # (g) 劇本過期
                     if (not trade.reached_prior_high and units > 0
                             and bars_since >= cfg.setup.setup_expiry_bars):
                         unfilled = []
                         pending.append(("sell", 1.0, f"劇本過期：{bars_since} 個交易日未創高"))
                         trade.exit_reason = "expired"
+
+                trade.pending_ladder = list(unfilled)
 
                 # 部位歸零且沒有待買單 → 結案
                 if units <= 0 and trade.entry_date is not None and not any(
