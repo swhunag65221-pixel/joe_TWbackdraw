@@ -84,13 +84,13 @@ class TradePlan:
         else:
             out.append(f"  停利（取較緊）    max(前高, MA{ex.ma_period}) 與 "
                        f"自高點回檔 {ex.trail_drawdown:.0%} 兩者取高 → 跌破出清")
-        out.append(f"  收盤 < {lv.warn_line:,.0f}   → {derisk}")
+        out.append(f"  收盤 < {lv.stop_line:,.0f}   → {derisk}")
         out.append(f"  收盤 < {lv.invalidation:,.0f}   → 全部出場，不留倉")
         out.append("")
         out.append("提醒：00631L 為 2 倍槓桿，指數 -1% ≈ ETF -2%（另有波動耗損與內扣）。")
         to_stop = lv.invalidation / self.reference_index - 1
-        to_warn = lv.warn_line / self.reference_index - 1
-        out.append(f"      現價到警戒線 {to_warn:.1%}（ETF 約 {2 * to_warn:.0%}）、"
+        to_warn = lv.stop_line / self.reference_index - 1
+        out.append(f"      現價到停損線 {to_warn:.1%}（ETF 約 {2 * to_warn:.0%}）、"
                    f"到失效線 {to_stop:.1%}（ETF 約 {2 * to_stop:.0%}）。")
         return "\n".join(out)
 

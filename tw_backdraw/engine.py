@@ -73,8 +73,9 @@ def _blended_stop_distance(entry_index: float, levels: Levels, cfg: StrategyConf
     """兩段式停損的預期虧損距離（指數口徑）。
 
     先在警戒線減碼一半，剩下的在谷底出清，真正的預期損失介於兩者之間。
+    警戒段用 `levels.stop_line`（含主防線的假跌破緩衝）—— 那才是真正會成交的價位。
     """
-    to_warn = max(entry_index - levels.warn_line, 0.0) / entry_index
+    to_warn = max(entry_index - levels.stop_line, 0.0) / entry_index
     to_trough = max(entry_index - levels.invalidation, 0.0) / entry_index
     f = cfg.exit.warn_derisk_fraction
     blended = f * to_warn + (1.0 - f) * to_trough
@@ -249,9 +250,12 @@ class Engine:
                     unfilled = []
                     derisked = True
                     verb = "清倉" if cfg.exit.warn_derisk_fraction >= 1.0 else "減碼"
+                    why = (f"{cfg.levels.warn_line_ratio:.1%} 回補位"
+                           if lv.stop_line >= lv.warn_line
+                           else f"主防線 {lv.half_line:,.0f} 的 "
+                                f"{cfg.levels.half_line_buffer:.1%} 緩衝")
                     pending.append(("sell", cfg.exit.warn_derisk_fraction,
-                                    f"警戒{verb}：收盤跌破 {lv.warn_line:,.0f}"
-                                    f"（{cfg.levels.warn_line_ratio:.1%} 回補位）"))
+                                    f"警戒{verb}：收盤跌破 {lv.stop_line:,.0f}（{why}）"))
 
                 else:
                     adds_allowed = zone in ("healthy", "buffer", "breakout")

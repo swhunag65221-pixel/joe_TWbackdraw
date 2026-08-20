@@ -94,10 +94,11 @@ def futures_leverage(entry_index: float, levels: Levels, cfg: StrategyConfig,
                      max_leverage: float = 5.0) -> float:
     """依停損距離決定槓桿倍數，上限 `max_leverage`。
 
-    停損距離的定義與 ETF 版一致（依 `warn_derisk_fraction` 對警戒線與失效線加權），
+    停損距離的定義與 ETF 版一致（依 `warn_derisk_fraction` 對停損線與失效線加權，
+    停損線含主防線的假跌破緩衝 —— 用警戒線會低估距離、把槓桿放得過大），
     但**不套用 `min_stop_distance` 下限**，理由見模組說明。
     """
-    to_warn = max(entry_index - levels.warn_line, 0.0) / entry_index
+    to_warn = max(entry_index - levels.stop_line, 0.0) / entry_index
     to_trough = max(entry_index - levels.invalidation, 0.0) / entry_index
     f = cfg.exit.warn_derisk_fraction
     dist = f * to_warn + (1.0 - f) * to_trough
@@ -159,7 +160,7 @@ def entries_from_trades(trades, bars, cfg: StrategyConfig,
             entry_i=e_i, exit_i=x_i,
             leverage=futures_leverage(entry_index, t.levels, cfg, max_leverage),
             entry_index=entry_index,
-            stop_distance=(entry_index - t.levels.warn_line) / entry_index,
+            stop_distance=(entry_index - t.levels.stop_line) / entry_index,
             trade=t))
     return out
 
@@ -304,7 +305,10 @@ def format_trade_details(details: list[TradeDetail]) -> str:
             f"{s.bars_to_repair} 個交易日補回 {s.repair_fraction:.0%}")
         lines.append(
             f"              訊號日指數 {s.trigger_close:,.0f}（距前高 {d.from_peak:+.1%}）"
-            f"　警戒線 {lv.warn_line:,.0f}　失效線 {lv.invalidation:,.0f}")
+            f"　停損線 {lv.stop_line:,.0f}"
+            + (f"（警戒線 {lv.warn_line:,.0f} 再扣假跌破緩衝）"
+               if lv.stop_line < lv.warn_line else "（警戒線）")
+            + f"　失效線 {lv.invalidation:,.0f}")
         lines.append(
             f"    距離停損 {t.stop_distance:.2%}　→　槓桿 "
             f"{t.leverage:.2f}x（風險預算 ÷ 停損距離，上限封頂）")

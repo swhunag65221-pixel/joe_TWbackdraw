@@ -62,7 +62,7 @@ def render_status(result: Result, bars: list[Bar], cfg: StrategyConfig,
     out.append(f"目前分區    {zone}　{zone_note}")
     out.append(f"距前高      {c / lv.peak - 1:+.1%}　"
                f"距主防線 {c / lv.half_line - 1:+.1%}　"
-               f"距警戒線 {c / lv.warn_line - 1:+.1%}　"
+               f"距停損線 {c / lv.stop_line - 1:+.1%}　"
                f"距失效線 {c / lv.invalidation - 1:+.1%}")
     out.append("")
 
@@ -92,12 +92,14 @@ def render_status(result: Result, bars: list[Bar], cfg: StrategyConfig,
         out.append(f"  賣 {'全部':>6}　自波段最高收盤回檔 {cfg.exit.trail_drawdown:.0%}（移動停利已啟動）")
     else:
         out.append(f"  賣 {'全部':>6}　創高後啟動移動停利（自最高收盤回檔 {cfg.exit.trail_drawdown:.0%}）")
-    out.append(f"  賣 {cfg.exit.warn_derisk_fraction:>6.0%}　收盤 < {lv.warn_line:,.0f}（警戒線）")
+    note = ("警戒線" if lv.stop_line >= lv.warn_line
+            else f"主防線 {lv.half_line:,.0f} 的 {cfg.levels.half_line_buffer:.1%} 緩衝")
+    out.append(f"  賣 {cfg.exit.warn_derisk_fraction:>6.0%}　收盤 < {lv.stop_line:,.0f}（{note}）")
     out.append(f"  賣 {'全部':>6}　收盤 < {lv.invalidation:,.0f}（失效線）")
     out.append("")
 
     # 實際會把部位清光的第一條線：警戒線設定為全數出場時就是它，否則才是失效線
-    full_exit = (lv.warn_line if cfg.exit.warn_derisk_fraction >= 1.0 else lv.invalidation)
+    full_exit = (lv.stop_line if cfg.exit.warn_derisk_fraction >= 1.0 else lv.invalidation)
     lev = cfg.sizing.leverage
     gap = full_exit / c - 1
     out.append(f"預期最大損失  跌到出清線 {full_exit:,.0f}（{gap:.1%}），"

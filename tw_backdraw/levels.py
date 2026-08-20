@@ -30,6 +30,17 @@ class Levels:
     def drop_pct(self) -> float:
         return self.drop / self.peak
 
+    @property
+    def stop_line(self) -> float:
+        """真正會觸發出場的價位。
+
+        `zone()` 要落到 warning 得同時跌破警戒線**與**主防線的假跌破緩衝區，
+        所以實際的停損線是兩者取低。預設參數下警戒線與主防線重合
+        （`warn_line_ratio == half_line_ratio`），緩衝區就成了真正的觸發點 ——
+        收盤跌破主防線 0.5% 以內會被容忍，超過才出場。
+        """
+        return min(self.warn_line, self.half_line_with_buffer)
+
     def repair_fraction(self, price: float) -> float:
         """價格相當於補回跌幅的幾成。"""
         if self.drop <= 0:

@@ -64,8 +64,8 @@ class TestLeverage(unittest.TestCase):
         self.assertGreater(near, far)
 
     def test_capped_at_max(self):
-        # 進場價幾乎貼著警戒線 → 距離趨近 0 → 應被上限擋住
-        entry = self.lv.warn_line * 1.0001
+        # 進場價幾乎貼著停損線 → 距離趨近 0 → 應被上限擋住
+        entry = self.lv.stop_line * 1.0001
         self.assertAlmostEqual(futures_leverage(entry, self.lv, DEFAULT_CONFIG), 5.0)
         self.assertAlmostEqual(
             futures_leverage(entry, self.lv, DEFAULT_CONFIG, max_leverage=3.0), 3.0)
@@ -73,7 +73,8 @@ class TestLeverage(unittest.TestCase):
     def test_matches_risk_budget_when_not_capped(self):
         entry = 46200.0
         lev = futures_leverage(entry, self.lv, DEFAULT_CONFIG)
-        dist = (entry - self.lv.warn_line) / entry      # warn_derisk=1.0 → 只算到警戒線
+        # warn_derisk=1.0 → 只算到停損線（警戒線與主防線緩衝取低者）
+        dist = (entry - self.lv.stop_line) / entry
         self.assertAlmostEqual(lev * dist, DEFAULT_CONFIG.sizing.risk_per_trade, places=9)
 
     def test_min_stop_distance_floor_is_not_applied(self):
@@ -221,6 +222,30 @@ class TestTradeDetails(unittest.TestCase):
         d = self._run([1.0, 1.2, 1.1, 5.0, 0.1], 2)
         self.assertAlmostEqual(d.mfe, 0.2)
         self.assertAlmostEqual(d.mae, 0.0)
+
+
+class TestStopLine(unittest.TestCase):
+    """真正會觸發出場的價位 = min(警戒線, 主防線的假跌破緩衝)。"""
+
+    def test_default_config_stop_is_the_buffer_not_the_warn_line(self):
+        from tw_backdraw.levels import build_levels
+        lv = build_levels(9569.0, 8513.0, DEFAULT_CONFIG.levels)
+        # 預設警戒線 = 主防線（皆為 50% 回補位），緩衝壓低 0.5%
+        self.assertAlmostEqual(lv.warn_line, lv.half_line)
+        self.assertAlmostEqual(lv.stop_line, lv.half_line * 0.995)
+        self.assertLess(lv.stop_line, lv.warn_line)
+
+    def test_low_warn_line_makes_the_warn_line_the_stop(self):
+        from tw_backdraw.levels import build_levels
+        lv = build_levels(9569.0, 8513.0, POST_CONFIG.levels)   # 警戒線 38.2%
+        self.assertLess(lv.warn_line, lv.half_line_with_buffer)
+        self.assertAlmostEqual(lv.stop_line, lv.warn_line)
+
+    def test_zone_turns_warning_exactly_at_the_stop_line(self):
+        from tw_backdraw.levels import build_levels
+        lv = build_levels(9569.0, 8513.0, DEFAULT_CONFIG.levels)
+        self.assertNotEqual(lv.zone(lv.stop_line + 1e-6), "warning")
+        self.assertEqual(lv.zone(lv.stop_line - 1e-6), "warning")
 
 
 if __name__ == "__main__":
