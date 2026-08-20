@@ -249,6 +249,7 @@ tw_backdraw/
   leveraged.py   00631L 的 2 倍槓桿淨值模型（含內扣與波動耗損）
   plan.py        訊號 → 可下單的操作計畫
   status.py      進行中部位的現況與下一個觸發點
+  futures.py     台指期執行版（連續合約換倉、依停損距離定槓桿、逐筆明細）
   backtest.py    回測與績效統計
   cli.py         plan / scan / episodes / status / backtest 五個指令
 scripts/
@@ -259,7 +260,12 @@ scripts/
   grid_search.py   648,000 組參數搜尋 + 邊際分析
   walk_forward.py  前半段選參數、後半段驗收的樣本外測試
   finlab_report.py FinLab sim() 回測，供 report.display() 使用
+  tx_data.py       台指期資料載入（指數日線 + 已還原換倉價差的連續序列）
+  futures_trades.py 台指期逐筆交易明細（進場條件、槓桿、MFE/MAE/期間回撤）
+  fetch_taifex_rolls.py 期交所分月合約收盤價（算換倉價差用）
+  make_futures_script.py 單檔可執行的台指期回測腳本產生器
 notebooks/         Colab 用的 .ipynb
+dist/              單檔可執行的腳本（tx_futures_backtest.py）
 docs/strategy.md   完整策略說明
 tests/             單元測試
 ```

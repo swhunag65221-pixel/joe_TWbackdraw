@@ -183,5 +183,45 @@ class TestSameDayExecution(unittest.TestCase):
         self.assertEqual((same[0].entry_i, same[0].exit_i), (1, 2))
 
 
+class TestTradeDetails(unittest.TestCase):
+    """逐筆明細的 MFE / MAE / 期間最大回撤。"""
+
+    def _run(self, nav_path, exit_i):
+        from tw_backdraw.futures import FuturesTrade, trade_details
+        ds = days(len(nav_path))
+        e = FuturesEntry(entry_i=0, exit_i=exit_i, leverage=2.0,
+                         entry_index=100.0, stop_distance=0.05)
+        t = FuturesTrade(entry_date=ds[0], exit_date=ds[exit_i or -1],
+                         entry_index=100.0, entry_futures=100.0,
+                         exit_futures=100.0, leverage=2.0, stop_distance=0.05,
+                         futures_return=0.0, ret=nav_path[exit_i or -1] - 1.0)
+        return trade_details(ds, nav_path, [e], [t])[0]
+
+    def test_extremes_are_measured_from_entry_and_running_peak(self):
+        # 1.0 → 1.5 → 0.9 → 1.2：MFE +50%、MAE −10%、自高點回撤 −40%
+        d = self._run([1.0, 1.5, 0.9, 1.2], 3)
+        self.assertAlmostEqual(d.mfe, 0.5)
+        self.assertAlmostEqual(d.mae, -0.1)
+        self.assertAlmostEqual(d.max_drawdown, -0.4)
+        self.assertEqual(d.bars_held, 3)
+
+    def test_monotonic_rise_has_no_drawdown(self):
+        d = self._run([1.0, 1.1, 1.3], 2)
+        self.assertAlmostEqual(d.max_drawdown, 0.0)
+        self.assertAlmostEqual(d.mae, 0.0)
+
+    def test_open_trade_runs_to_last_bar(self):
+        d = self._run([1.0, 1.4, 0.8], None)
+        self.assertEqual(d.bars_held, 2)
+        self.assertAlmostEqual(d.mfe, 0.4)
+        self.assertAlmostEqual(d.mae, -0.2)
+
+    def test_extremes_ignore_bars_outside_the_holding_window(self):
+        """出場之後的淨值不能算進這筆的極值。"""
+        d = self._run([1.0, 1.2, 1.1, 5.0, 0.1], 2)
+        self.assertAlmostEqual(d.mfe, 0.2)
+        self.assertAlmostEqual(d.mae, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

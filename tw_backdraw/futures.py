@@ -128,6 +128,7 @@ class FuturesEntry:
     leverage: float
     entry_index: float       # 進場當日的指數收盤
     stop_distance: float
+    trade: object | None = None   # 產生這筆部位的引擎交易，供逐筆檢視用
 
 
 def entries_from_trades(trades, bars, cfg: StrategyConfig,
@@ -158,7 +159,8 @@ def entries_from_trades(trades, bars, cfg: StrategyConfig,
             entry_i=e_i, exit_i=x_i,
             leverage=futures_leverage(entry_index, t.levels, cfg, max_leverage),
             entry_index=entry_index,
-            stop_distance=(entry_index - t.levels.warn_line) / entry_index))
+            stop_distance=(entry_index - t.levels.warn_line) / entry_index,
+            trade=t))
     return out
 
 
@@ -217,3 +219,99 @@ def vehicle_series(dates: list[date], continuous: list[float],
             futures_return=continuous[-1] / f0 - 1.0,
             ret=nav[-1] / eq_at_entry - 1.0))
     return nav, detail
+
+
+@dataclass(frozen=True)
+class TradeDetail:
+    """單筆期貨部位的完整檢視：報酬、期間極值，以及當初的進場條件。"""
+
+    trade: FuturesTrade
+    entry: FuturesEntry
+    bars_held: int
+    mfe: float            # 期間最大浮動獲利（權益，相對進場）
+    mae: float            # 期間最大浮動虧損（權益，相對進場）
+    max_drawdown: float   # 期間內從波段高點起算的最大回撤
+
+    # --- 進場條件（來自訊號本身） ---
+    @property
+    def setup(self):
+        return self.entry.trade.setup
+
+    @property
+    def levels(self):
+        return self.entry.trade.levels
+
+    @property
+    def exit_reason(self) -> str:
+        """出場說明。優先用出場那筆成交自己記的理由，比代碼具體。"""
+        t = self.entry.trade
+        if t.exit_reason == "open":
+            return "尚未出場（持有中）"
+        fills = t.fills
+        if len(fills) > 1 and fills[-1].side == "sell":
+            return fills[-1].reason
+        return t.exit_reason
+
+    @property
+    def from_peak(self) -> float:
+        """訊號日距離前高還有多遠（負值＝仍低於前高）。"""
+        s = self.setup
+        return s.trigger_close / s.peak - 1.0
+
+
+def trade_details(dates: list[date], nav: list[float],
+                  entries: list[FuturesEntry],
+                  detail: list[FuturesTrade]) -> list[TradeDetail]:
+    """把淨值序列切成逐筆部位，算出每筆的 MFE / MAE / 期間最大回撤。
+
+    極值一律以**權益**衡量（已含槓桿與進場成本），所以數字就是帳戶當下看到的
+    浮動盈虧，不是期貨本身的漲跌。
+    """
+    by_entry_date = {dates[e.entry_i]: e for e in entries}
+    out: list[TradeDetail] = []
+    for t in detail:
+        e = by_entry_date.get(t.entry_date)
+        if e is None:
+            continue
+        a = e.entry_i
+        b = e.exit_i if e.exit_i is not None else len(dates) - 1
+        seg = nav[a:b + 1]
+        base = seg[0]
+        if base <= 0:
+            continue
+        peak, dd = base, 0.0
+        for x in seg:
+            peak = max(peak, x)
+            dd = min(dd, x / peak - 1.0)
+        out.append(TradeDetail(
+            trade=t, entry=e, bars_held=b - a,
+            mfe=max(seg) / base - 1.0,
+            mae=min(seg) / base - 1.0,
+            max_drawdown=dd))
+    return out
+
+
+def format_trade_details(details: list[TradeDetail]) -> str:
+    """逐筆列出交易與當初的進場條件（中文，供 CLI 直接輸出）。"""
+    lines: list[str] = []
+    for n, d in enumerate(details, 1):
+        t, s, lv = d.trade, d.setup, d.levels
+        exit_txt = str(t.exit_date) if t.exit_date else "持有中（尚未平倉）"
+        lines.append(f"[{n}] {t.entry_date} → {exit_txt}　持有 {d.bars_held} 個交易日")
+        lines.append(
+            f"    進場條件：{s.peak_date} 高點 {s.peak:,.0f} → {s.trough_date} 谷底 "
+            f"{s.trough:,.0f}（回檔 {s.drop_pct:.1%}），"
+            f"{s.bars_to_repair} 個交易日補回 {s.repair_fraction:.0%}")
+        lines.append(
+            f"              訊號日指數 {s.trigger_close:,.0f}（距前高 {d.from_peak:+.1%}）"
+            f"　警戒線 {lv.warn_line:,.0f}　失效線 {lv.invalidation:,.0f}")
+        lines.append(
+            f"    距離停損 {t.stop_distance:.2%}　→　槓桿 "
+            f"{t.leverage:.2f}x（風險預算 ÷ 停損距離，上限封頂）")
+        lines.append(
+            f"    期貨報酬 {t.futures_return:+.1%}　權益報酬 {t.ret:+.1%}"
+            f"　最大報酬 {d.mfe:+.1%}　最大不利 {d.mae:+.1%}"
+            f"　期間最大回撤 {d.max_drawdown:.1%}")
+        lines.append(f"    出場原因：{d.exit_reason}")
+        lines.append("")
+    return "\n".join(lines)

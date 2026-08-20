@@ -217,7 +217,7 @@ def run(preset: str, max_leverage: float, same_day: bool = True):
     from tw_backdraw.config import PRESETS
     from tw_backdraw.engine import Engine
     from tw_backdraw.futures import (
-        FuturesCost, entries_from_trades, vehicle_series)
+        FuturesCost, entries_from_trades, trade_details, vehicle_series)
 
     cfg = PRESETS[preset]
     bars, fseries, missing = load_data()
@@ -232,9 +232,11 @@ def run(preset: str, max_leverage: float, same_day: bool = True):
     result = Engine(cfg).run(bars, fseries)
     entries = entries_from_trades(result.trades, bars, cfg, max_leverage, same_day)
 
-    nav, detail = vehicle_series([b.d for b in bars], fseries, entries,
+    dates = [b.d for b in bars]
+    nav, detail = vehicle_series(dates, fseries, entries,
                                  FuturesCost(), [b.close for b in bars])
-    return bars, fseries, entries, nav, detail
+    return (bars, fseries, entries, nav, detail,
+            trade_details(dates, nav, entries, detail))
 
 
 def build_report(bars, nav, entries, name: str):
@@ -302,6 +304,9 @@ def main() -> int:
     ap.add_argument("--max-leverage", type=float, default=5.0, help="槓桿上限，預設 5")
     ap.add_argument("--next-day-fill", action="store_true",
                     help="改用隔一個交易日收盤成交（預設為當天期貨收盤）")
+    ap.add_argument("--trades-since", default=None, metavar="YYYY-MM-DD",
+                    help="額外印出這天之後每一筆的完整明細（進場條件、"
+                         "距離停損、槓桿、最大報酬／最大不利／期間最大回撤）")
     ap.add_argument("--html", default="tx_futures_report.html",
                     help="把互動報表寫成 HTML 檔，設空字串則不輸出")
     ap.add_argument("--workdir", default=".tw_backdraw_pkg",
@@ -312,7 +317,7 @@ def main() -> int:
     login()
 
     import pandas as pd
-    bars, fseries, entries, nav, detail = run(
+    bars, fseries, entries, nav, detail, details = run(
         args.preset, args.max_leverage, same_day=not args.next_day_fill)
 
     print(f"\\n{'進場':<12}{'出場':<12}{'停損距離':>9}{'槓桿':>7}"
@@ -322,6 +327,14 @@ def main() -> int:
         print(f"{t.entry_date!s:<12}{str(t.exit_date or '持有中'):<12}"
               f"{t.stop_distance:>9.2%}{t.leverage:>7.2f}"
               f"{t.futures_return:>10.1%}{t.ret:>10.1%}")
+
+    if args.trades_since:
+        from datetime import datetime as _dt
+        from tw_backdraw.futures import format_trade_details
+        cut = _dt.strptime(args.trades_since, "%Y-%m-%d").date()
+        picked = [d for d in details if d.trade.entry_date >= cut]
+        print(f"\\n—— {cut} 之後的逐筆明細（{len(picked)} 筆）——\\n")
+        print(format_trade_details(picked))
 
     levs = [t.leverage for t in detail]
     capped = sum(1 for x in levs if x >= args.max_leverage - 1e-9)
