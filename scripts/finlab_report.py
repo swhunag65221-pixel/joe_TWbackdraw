@@ -238,7 +238,16 @@ def build_report(preset: str = "tuned", cfg: StrategyConfig | None = None,
     elif m["finlab_market"]:
         params["market"] = m["finlab_market"]
     params.update(sim_kwargs)
-    return sim(pos, **params)
+    report = sim(pos, **params)
+
+    # `trade_at_price` 收到 DataFrame 時，FinLab 會把它原封不動存進
+    # report.trade_at，而 report.display() 要把 positionConfig 序列化成 JSON，
+    # 碰到 DataFrame 就會丟 "Object of type 'DataFrame' is not JSON serializable"。
+    # 成交與績效在 sim() 當下就算完了，這裡只是把顯示用的標籤換成字串，
+    # creturn / trades / 各項指標都不受影響（已驗證數值完全相同）。
+    if not isinstance(params["trade_at_price"], str):
+        report.trade_at = "close"
+    return report
 
 
 # --------------------------------------------------------------------------
