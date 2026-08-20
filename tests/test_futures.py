@@ -123,5 +123,65 @@ class TestVehicle(unittest.TestCase):
         self.assertAlmostEqual(det[0].ret, 0.20)
 
 
+class TestSameDayExecution(unittest.TestCase):
+    """訊號日當天的期貨收盤成交 vs 隔日成交。"""
+
+    class _Fill:
+        def __init__(self, d):
+            self.d = d
+
+    class _Setup:
+        trigger_close = 46000.0
+
+    class _Trade:
+        """最小的假交易物件；價位用真的 build_levels 產生。"""
+
+        def __init__(self, fills):
+            self.fills = fills
+            self.levels = build_levels(47742.0, 39933.0, DEFAULT_CONFIG.levels)
+            self.setup = TestSameDayExecution._Setup()
+
+    class _Bar:
+        def __init__(self, d):
+            self.d = d
+
+    def _bars(self, n):
+        return [self._Bar(d) for d in days(n)]
+
+    def test_same_day_shifts_execution_one_bar_earlier(self):
+        from tw_backdraw.futures import entries_from_trades
+        bars = self._bars(6)
+        t = self._Trade([self._Fill(bars[2].d), self._Fill(bars[5].d)])
+        same = entries_from_trades([t], bars, DEFAULT_CONFIG, same_day=True)[0]
+        next_day = entries_from_trades([t], bars, DEFAULT_CONFIG, same_day=False)[0]
+        self.assertEqual((same.entry_i, same.exit_i), (1, 4))
+        self.assertEqual((next_day.entry_i, next_day.exit_i), (2, 5))
+
+    def test_leverage_is_unaffected_by_execution_timing(self):
+        from tw_backdraw.futures import entries_from_trades
+        bars = self._bars(6)
+        t = self._Trade([self._Fill(bars[2].d), self._Fill(bars[5].d)])
+        a = entries_from_trades([t], bars, DEFAULT_CONFIG, same_day=True)[0]
+        b = entries_from_trades([t], bars, DEFAULT_CONFIG, same_day=False)[0]
+        self.assertAlmostEqual(a.leverage, b.leverage)
+
+    def test_open_trade_keeps_none_exit(self):
+        from tw_backdraw.futures import entries_from_trades
+        bars = self._bars(6)
+        t = self._Trade([self._Fill(bars[3].d)])
+        e = entries_from_trades([t], bars, DEFAULT_CONFIG, same_day=True)[0]
+        self.assertEqual(e.entry_i, 2)
+        self.assertIsNone(e.exit_i)
+
+    def test_degenerate_same_bar_trade_is_dropped(self):
+        """成交日相鄰時，往前挪會讓進出場落在同一根 K —— 該筆不成立。"""
+        from tw_backdraw.futures import entries_from_trades
+        bars = self._bars(6)
+        t = self._Trade([self._Fill(bars[2].d), self._Fill(bars[3].d)])
+        same = entries_from_trades([t], bars, DEFAULT_CONFIG, same_day=True)
+        self.assertEqual(len(same), 1)
+        self.assertEqual((same[0].entry_i, same[0].exit_i), (1, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

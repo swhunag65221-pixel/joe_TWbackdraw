@@ -19,6 +19,12 @@
    因此持有期間的權益是**線性**於期貨報酬，不是複利：
 
        權益(t) / 權益(進場) = 1 + L × (F(t)/F(進場) − 1)
+
+4. **當日成交**：加權指數 13:30 收盤、台指期 13:45 收盤，中間有 15 分鐘。
+   訊號以指數收盤判定後，還來得及在**當天的期貨收盤**成交，不必等到隔天。
+   ETF 版沒有這個空間（同一時間收盤），只能次日成交。
+   這個差別對停損特別關鍵 —— 隔夜跳空正是把「假設停損 1.5%」放大成
+   「實際虧損 7.8%」的主因。以 `entries_from_trades(same_day=...)` 切換。
 """
 
 from __future__ import annotations
@@ -122,6 +128,38 @@ class FuturesEntry:
     leverage: float
     entry_index: float       # 進場當日的指數收盤
     stop_distance: float
+
+
+def entries_from_trades(trades, bars, cfg: StrategyConfig,
+                        max_leverage: float = 5.0,
+                        same_day: bool = True) -> list["FuturesEntry"]:
+    """把引擎的交易轉成期貨部位。
+
+    引擎的 `Fill.d` 記的是**成交日**，而它的決策發生在前一根 K 的收盤。
+
+    Args:
+        same_day: True 代表當天期貨收盤成交（指數 13:30 收、期貨 13:45 收，
+            中間 15 分鐘足夠下單），成交索引因此往前挪一根；
+            False 則沿用引擎原本的隔日成交。
+    """
+    index_of = {b.d: i for i, b in enumerate(bars)}
+    shift = 1 if same_day else 0
+    out: list[FuturesEntry] = []
+    for t in trades:
+        if not t.fills:
+            continue
+        e_i = max(index_of[t.fills[0].d] - shift, 0)
+        x_i = (max(index_of[t.fills[-1].d] - shift, 0)
+               if len(t.fills) > 1 else None)
+        if x_i is not None and x_i <= e_i:      # 同日進出場，視為未成立
+            continue
+        entry_index = t.setup.trigger_close
+        out.append(FuturesEntry(
+            entry_i=e_i, exit_i=x_i,
+            leverage=futures_leverage(entry_index, t.levels, cfg, max_leverage),
+            entry_index=entry_index,
+            stop_distance=(entry_index - t.levels.warn_line) / entry_index))
+    return out
 
 
 def vehicle_series(dates: list[date], continuous: list[float],

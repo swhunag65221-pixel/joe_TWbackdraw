@@ -93,8 +93,18 @@ BODY = '''#!/usr/bin/env python3
 
 3. **進場後不調整口數**：持有期間權益為 1 + L×(F/F0 − 1)，線性、不複利、不再平衡。
 
-⚠️ 這是研究專案，不是投資建議。預設的 5 倍上限在歷史上會產生 −71.5% 的最大
-回檔與單筆 −48% 的虧損，原因見輸出末尾的「停損假設 vs 實際」一節。
+4. **當天成交**：加權指數 13:30 收盤、台指期 13:45 收盤，中間 15 分鐘足夠下單。
+   訊號以指數收盤判定後，當天的期貨收盤就能成交，不必等隔天。
+   ETF 版沒有這個空間（同時收盤），只能次日成交。
+   實測差距很大 —— 隔夜跳空正是把「假設停損 1.5%」放大成「實際虧損 7.8%」的主因：
+
+       隔日成交   CAGR 14.9%  最大回檔 -71.5%  單筆最差 -48.1%
+       當天成交   CAGR 17.1%  最大回檔 -45.7%  單筆最差 -22.0%
+
+   以 --next-day-fill 可切回隔日成交做對照。
+
+⚠️ 這是研究專案，不是投資建議。即使改成當天成交，5 倍上限仍有 −45.7% 的
+最大回檔與單筆 −22% 的虧損，原因見輸出末尾的「停損假設 vs 實際」一節。
 """
 
 from __future__ import annotations
@@ -203,11 +213,11 @@ def load_data():
 
 
 # ---------------------------------------------------------------- 回測
-def run(preset: str, max_leverage: float):
+def run(preset: str, max_leverage: float, same_day: bool = True):
     from tw_backdraw.config import PRESETS
     from tw_backdraw.engine import Engine
     from tw_backdraw.futures import (
-        FuturesCost, FuturesEntry, futures_leverage, vehicle_series)
+        FuturesCost, entries_from_trades, vehicle_series)
 
     cfg = PRESETS[preset]
     bars, fseries, missing = load_data()
@@ -217,18 +227,10 @@ def run(preset: str, max_leverage: float):
     else:
         print("換倉價差：全數取得，無缺漏")
 
+    print("成交時點：" + ("當天期貨收盤（指數 13:30 收、期貨 13:45 收）"
+                       if same_day else "隔一個交易日收盤"))
     result = Engine(cfg).run(bars, fseries)
-    i_of = {b.d: i for i, b in enumerate(bars)}
-    entries = []
-    for t in result.trades:
-        e_i = i_of[t.fills[0].d]
-        x_i = i_of[t.fills[-1].d] if len(t.fills) > 1 else None
-        entry_index = t.setup.trigger_close
-        entries.append(FuturesEntry(
-            entry_i=e_i, exit_i=x_i,
-            leverage=futures_leverage(entry_index, t.levels, cfg, max_leverage),
-            entry_index=entry_index,
-            stop_distance=(entry_index - t.levels.warn_line) / entry_index))
+    entries = entries_from_trades(result.trades, bars, cfg, max_leverage, same_day)
 
     nav, detail = vehicle_series([b.d for b in bars], fseries, entries,
                                  FuturesCost(), [b.close for b in bars])
@@ -298,6 +300,8 @@ def main() -> int:
     ap.add_argument("--preset", default="tuned",
                     help="參數組：tuned（預設）/ post / balanced / winrate")
     ap.add_argument("--max-leverage", type=float, default=5.0, help="槓桿上限，預設 5")
+    ap.add_argument("--next-day-fill", action="store_true",
+                    help="改用隔一個交易日收盤成交（預設為當天期貨收盤）")
     ap.add_argument("--html", default="tx_futures_report.html",
                     help="把互動報表寫成 HTML 檔，設空字串則不輸出")
     ap.add_argument("--workdir", default=".tw_backdraw_pkg",
@@ -308,7 +312,8 @@ def main() -> int:
     login()
 
     import pandas as pd
-    bars, fseries, entries, nav, detail = run(args.preset, args.max_leverage)
+    bars, fseries, entries, nav, detail = run(
+        args.preset, args.max_leverage, same_day=not args.next_day_fill)
 
     print(f"\\n{'進場':<12}{'出場':<12}{'停損距離':>9}{'槓桿':>7}"
           f"{'期貨報酬':>10}{'權益報酬':>10}")
@@ -323,8 +328,10 @@ def main() -> int:
     print(f"\\n槓桿：中位數 {sorted(levs)[len(levs) // 2]:.2f}　"
           f"範圍 {min(levs):.2f}~{max(levs):.2f}　封頂 {capped}/{len(levs)} 筆")
 
-    report = build_report(bars, nav, entries,
-                          f"台指期快速修復 {args.preset}（槓桿≤{args.max_leverage:g}x）")
+    fill = "隔日" if args.next_day_fill else "當日"
+    report = build_report(
+        bars, nav, entries,
+        f"台指期快速修復 {args.preset}（槓桿≤{args.max_leverage:g}x，{fill}成交）")
 
     eq = report.creturn
     idx_series = pd.Series([b.close for b in bars],
@@ -343,7 +350,8 @@ def main() -> int:
     worst = min(detail, key=lambda t: t.ret)
     print(f"\\n單筆最差：{worst.entry_date} → {worst.exit_date}　"
           f"槓桿 {worst.leverage:.2f}x　權益 {worst.ret:.1%}")
-    print("停損假設 vs 實際（實際跌幅常遠大於假設，因為訊號當日收盤才判定、隔日才成交）：")
+    print("停損假設 vs 實際（實際跌幅仍大於假設：訊號在收盤才判定，"
+          "且期貨與指數的 15 分鐘差內價格會續走）：")
     i_of = {b.d: i for i, b in enumerate(bars)}
     for t in sorted(detail, key=lambda t: t.ret)[:5]:
         a = i_of[t.entry_date]
