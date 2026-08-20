@@ -265,6 +265,7 @@ scripts/
   tx_data.py       台指期資料載入（指數日線 + 已還原換倉價差的連續序列）
   futures_trades.py 台指期逐筆交易明細（進場條件、槓桿、MFE/MAE/期間回撤）
   etf_trades.py    槓桿 ETF 逐筆交易明細（00631L / UPRO / TQQQ）
+  stop_distance_study.py 「停損距離 vs 報酬」假說檢驗（docs/strategy.md §14）
   fetch_taifex_rolls.py 期交所分月合約收盤價（算換倉價差用）
   make_futures_script.py 單檔可執行的台指期回測腳本產生器
 notebooks/         Colab 用的 .ipynb
