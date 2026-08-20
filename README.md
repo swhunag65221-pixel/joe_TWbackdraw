@@ -4,7 +4,9 @@
 本專案把這個觀察寫成一套可回測、可即時執行的規則，操作標的為
 **元大台灣50正2（00631L）**，訊號來源為**發行量加權股價指數（TAIEX）**。
 
-完整規則與推導見 **[docs/strategy.md](docs/strategy.md)**。
+完整規則與推導見 **[docs/strategy.md](docs/strategy.md)**；
+台指期 2014–2026 的逐筆交易明細見
+**[docs/futures_trades_2014_2026.md](docs/futures_trades_2014_2026.md)**。
 
 ---
 
@@ -267,6 +269,7 @@ scripts/
 notebooks/         Colab 用的 .ipynb
 dist/              單檔可執行的腳本（tx_futures_backtest.py）
 docs/strategy.md   完整策略說明
+docs/futures_trades_2014_2026.md  台指期逐筆交易明細（2014–2026）
 tests/             單元測試
 ```
 
