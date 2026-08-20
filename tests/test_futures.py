@@ -1,0 +1,127 @@
+"""台指期執行版的測試。"""
+
+from __future__ import annotations
+
+import unittest
+from datetime import date, timedelta
+
+from tw_backdraw.config import POST_CONFIG, DEFAULT_CONFIG
+from tw_backdraw.futures import (
+    FuturesCost, FuturesEntry, build_continuous, futures_leverage,
+    missing_rolls, vehicle_series,
+)
+from tw_backdraw.levels import build_levels
+
+FREE = FuturesCost(tax_rate=0.0, commission_per_lot=0.0)
+
+
+def days(n: int) -> list[date]:
+    return [date(2020, 1, 1) + timedelta(days=i) for i in range(n)]
+
+
+class TestContinuous(unittest.TestCase):
+    def test_no_roll_is_passthrough(self):
+        d = days(3)
+        out = build_continuous(d, [100.0, 110.0, 121.0], ['A'] * 3, {})
+        self.assertAlmostEqual(out[-1] / out[0], 1.21)
+
+    def test_roll_gap_is_removed(self):
+        """換倉價差不該變成損益。
+
+        近月 100 →（換倉日次月報 102）→ 次日近月 102。
+        真實報酬是 0%，若不還原會被記成 +2%。
+        """
+        d = days(3)
+        front = [100.0, 100.0, 102.0]
+        contract = ['202001', '202001', '202002']
+        out = build_continuous(d, front, contract, {d[1]: 102.0})
+        self.assertAlmostEqual(out[2] / out[1], 1.0, places=9)
+
+    def test_without_spread_data_falls_back_to_raw_jump(self):
+        d = days(3)
+        front = [100.0, 100.0, 102.0]
+        contract = ['202001', '202001', '202002']
+        out = build_continuous(d, front, contract, {})       # 沒給價差
+        self.assertAlmostEqual(out[2] / out[1], 1.02, places=9)
+        self.assertEqual(missing_rolls(d, contract, {}), [d[1]])
+
+    def test_backwardation_roll_is_a_gain_not_a_loss(self):
+        """逆價差（次月比近月低）換倉後，續抱應該賺到收斂，而不是被記成虧損。"""
+        d = days(3)
+        front = [100.0, 100.0, 99.0]          # 次日近月（＝原次月）99
+        contract = ['202001', '202001', '202002']
+        out = build_continuous(d, front, contract, {d[1]: 99.0})
+        self.assertAlmostEqual(out[2] / out[1], 1.0, places=9)
+
+
+class TestLeverage(unittest.TestCase):
+    def setUp(self):
+        self.lv = build_levels(47742.0, 39933.0, DEFAULT_CONFIG.levels)
+
+    def test_closer_stop_gives_more_leverage(self):
+        near = futures_leverage(44000.0, self.lv, DEFAULT_CONFIG)
+        far = futures_leverage(47000.0, self.lv, DEFAULT_CONFIG)
+        self.assertGreater(near, far)
+
+    def test_capped_at_max(self):
+        # 進場價幾乎貼著警戒線 → 距離趨近 0 → 應被上限擋住
+        entry = self.lv.warn_line * 1.0001
+        self.assertAlmostEqual(futures_leverage(entry, self.lv, DEFAULT_CONFIG), 5.0)
+        self.assertAlmostEqual(
+            futures_leverage(entry, self.lv, DEFAULT_CONFIG, max_leverage=3.0), 3.0)
+
+    def test_matches_risk_budget_when_not_capped(self):
+        entry = 46200.0
+        lev = futures_leverage(entry, self.lv, DEFAULT_CONFIG)
+        dist = (entry - self.lv.warn_line) / entry      # warn_derisk=1.0 → 只算到警戒線
+        self.assertAlmostEqual(lev * dist, DEFAULT_CONFIG.sizing.risk_per_trade, places=9)
+
+    def test_min_stop_distance_floor_is_not_applied(self):
+        """期貨版刻意不套 5% 下限；若套了，槓桿會恆為 1.6 倍。"""
+        entry = 44929.0                                  # 實際距離約 2.4%
+        lev = futures_leverage(entry, self.lv, DEFAULT_CONFIG)
+        floored = DEFAULT_CONFIG.sizing.risk_per_trade / DEFAULT_CONFIG.sizing.min_stop_distance
+        self.assertGreater(lev, floored)
+
+
+class TestVehicle(unittest.TestCase):
+    def test_fixed_contracts_are_linear_not_compounded(self):
+        d = days(3)
+        f = [100.0, 105.0, 110.0]
+        nav, _ = vehicle_series(d, f, [FuturesEntry(0, 2, 3.0, 10000.0, 0.0267)],
+                                FREE, [10000.0] * 3)
+        self.assertAlmostEqual(nav[1], 1.15)      # 1 + 3×5%
+        self.assertAlmostEqual(nav[2], 1.30)      # 1 + 3×10%，非 1.15×1.0476
+        self.assertNotAlmostEqual(nav[2], 1.15 * (1 + 3 * (110 / 105 - 1)), places=4)
+
+    def test_flat_while_out_of_market(self):
+        d = days(5)
+        f = [100.0, 110.0, 120.0, 130.0, 140.0]
+        nav, _ = vehicle_series(d, f, [FuturesEntry(1, 2, 2.0, 10000.0, 0.04)],
+                                FREE, [10000.0] * 5)
+        self.assertAlmostEqual(nav[0], 1.0)
+        self.assertAlmostEqual(nav[2], nav[3])    # 出場後持平
+        self.assertAlmostEqual(nav[3], nav[4])
+
+    def test_costs_scale_with_leverage(self):
+        d = days(2)
+        f = [100.0, 100.0]
+        cost = FuturesCost(tax_rate=0.001, commission_per_lot=0.0)
+        e = [FuturesEntry(0, 1, 4.0, 10000.0, 0.02)]
+        nav, det = vehicle_series(d, f, e, cost, [10000.0] * 2)
+        # 期貨沒動，只剩兩邊成本：4 × 0.1% × 2 ≈ -0.8%
+        self.assertAlmostEqual(det[0].ret, (1 - 4 * 0.001) ** 2 - 1, places=9)
+
+    def test_open_trade_is_reported(self):
+        d = days(3)
+        nav, det = vehicle_series(d, [100.0, 105.0, 110.0],
+                                  [FuturesEntry(0, None, 2.0, 10000.0, 0.04)],
+                                  FREE, [10000.0] * 3)
+        self.assertEqual(len(det), 1)
+        self.assertIsNone(det[0].exit_date)
+        self.assertAlmostEqual(det[0].futures_return, 0.10)
+        self.assertAlmostEqual(det[0].ret, 0.20)
+
+
+if __name__ == "__main__":
+    unittest.main()
