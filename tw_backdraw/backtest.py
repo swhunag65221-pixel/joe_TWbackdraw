@@ -89,3 +89,69 @@ def summarize(result: Result) -> Stats:
         max_drawdown=max_dd,
         median_max_adverse=statistics.median(adverse),
     )
+
+
+@dataclass(frozen=True)
+class TradeReview:
+    """單筆 ETF 交易的完整檢視：報酬、期間極值，以及當初的進場條件。"""
+
+    trade: "object"          # engine.Trade
+    bars_held: int
+    weight: float            # 實際建立的部位水位（佔權益比例）
+    stop_distance: float     # 訊號日收盤到停損線的距離
+    mfe: float               # 期間最大浮動獲利（權益，相對進場）
+    mae: float               # 期間最大浮動虧損（權益，相對進場）
+    max_drawdown: float      # 期間內從波段高點起算的最大回撤
+
+    @property
+    def setup(self):
+        return self.trade.setup
+
+    @property
+    def levels(self):
+        return self.trade.levels
+
+    @property
+    def from_peak(self) -> float:
+        s = self.setup
+        return s.trigger_close / s.peak - 1.0
+
+    @property
+    def exit_reason(self) -> str:
+        t = self.trade
+        if t.exit_reason == "open":
+            return "尚未出場（持有中）"
+        fills = t.fills
+        if len(fills) > 1 and fills[-1].side == "sell":
+            return fills[-1].reason
+        return t.exit_reason
+
+
+def review_trades(result: Result) -> list[TradeReview]:
+    """把權益曲線切成逐筆部位，算出每筆的 MFE / MAE / 期間最大回撤。
+
+    極值以**整體權益**衡量 —— 沒滿倉的時候現金部位會稀釋波動，
+    這正是實際帳戶看到的數字，不是標的本身的漲跌。
+    """
+    idx = {d: i for i, (d, _) in enumerate(result.equity_curve)}
+    out: list[TradeReview] = []
+    for t in result.trades:
+        if t.entry_date is None:
+            continue
+        a = idx[t.entry_date]
+        b = idx[t.exit_date] if t.exit_date in idx else len(result.equity_curve) - 1
+        seg = [eq for _, eq in result.equity_curve[a:b + 1]]
+        base = t.equity_at_entry
+        if not seg or base <= 0:
+            continue
+        peak, dd = seg[0], 0.0
+        for x in seg:
+            peak = max(peak, x)
+            dd = min(dd, x / peak - 1.0)
+        entry = t.setup.trigger_close
+        out.append(TradeReview(
+            trade=t, bars_held=b - a, weight=t.filled_weight,
+            stop_distance=max(entry - t.levels.stop_line, 0.0) / entry,
+            mfe=max(seg) / base - 1.0, mae=min(seg) / base - 1.0,
+            max_drawdown=dd))
+    return out

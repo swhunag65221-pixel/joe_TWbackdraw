@@ -264,12 +264,14 @@ scripts/
   finlab_report.py FinLab sim() 回測，供 report.display() 使用
   tx_data.py       台指期資料載入（指數日線 + 已還原換倉價差的連續序列）
   futures_trades.py 台指期逐筆交易明細（進場條件、槓桿、MFE/MAE/期間回撤）
+  etf_trades.py    槓桿 ETF 逐筆交易明細（00631L / UPRO / TQQQ）
   fetch_taifex_rolls.py 期交所分月合約收盤價（算換倉價差用）
   make_futures_script.py 單檔可執行的台指期回測腳本產生器
 notebooks/         Colab 用的 .ipynb
 dist/              單檔可執行的腳本（tx_futures_backtest.py）
 docs/strategy.md   完整策略說明
 docs/futures_trades_2014_2026.md  台指期逐筆交易明細（2014–2026）
+docs/etf_trades_2018_2026.md      UPRO / TQQQ 逐筆交易明細（2018–2026）
 tests/             單元測試
 ```
 
