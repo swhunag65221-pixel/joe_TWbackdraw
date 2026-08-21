@@ -267,6 +267,7 @@ scripts/
   etf_trades.py    槓桿 ETF 逐筆交易明細（00631L / UPRO / TQQQ）
   stop_distance_study.py 「停損距離 vs 報酬」假說檢驗（docs/strategy.md §14）
   allocation_study.py 三條策略的相關性、分段穩定性與混合績效
+  weight_rule_study.py UPRO/TQQQ 水位規則檢驗（docs/strategy.md §15）
   fetch_taifex_rolls.py 期交所分月合約收盤價（算換倉價差用）
   make_futures_script.py 單檔可執行的台指期回測腳本產生器
 notebooks/         Colab 用的 .ipynb
