@@ -346,3 +346,76 @@ def fixed_leverage(entries: list["FuturesEntry"], leverage: float) -> list["Futu
     """把所有部位改成同一個槓桿倍數，不再依停損距離決定。"""
     return [FuturesEntry(e.entry_i, e.exit_i, leverage, e.entry_index,
                          e.stop_distance, e.trade) for e in entries]
+
+
+def core_overlay(dates: list[date], continuous: list[float],
+                 entries: list["FuturesEntry"], cost: FuturesCost,
+                 index_close: list[float], core_leverage: float,
+                 ma: list[float | None]) -> tuple[list[float], list[FuturesTrade], float]:
+    """在 `vehicle_series` 之上，空手期間補一個低槓桿的核心部位。
+
+    核心只在**策略沒有部位**且**收盤高於均線**時持有，策略一有訊號就先平掉核心。
+    逆勢濾網（`trend_filter(below=True)`）只在收盤**低於**均線時進場，
+    所以兩者天然互斥：低於均線做策略、高於均線抱核心，中間沒有重疊。
+
+    時序與策略一致：`ma`/收盤在第 i 天收盤後判定，部位在當天期貨收盤建立，
+    因此第 i 天的損益由**前一天**的判斷決定 —— 用當天判斷賺當天的報酬是前視偏誤。
+
+    回傳 (淨值, 策略交易明細, 有部位的日子佔比)。核心部位不算成交易筆數。
+    """
+    on = [m is not None and c > m for c, m in zip(index_close, ma)]
+    by_entry = {e.entry_i: e for e in entries}
+    nav = [1.0] * len(dates)
+    detail: list[FuturesTrade] = []
+    equity, active, eq_at_entry, eq_after_cost, f0 = 1.0, None, 0.0, 0.0, 0.0
+    holding_core, exposed = False, 0
+
+    for i in range(len(dates)):
+        if active is not None:
+            v = eq_after_cost * (1.0 + active.leverage * (continuous[i] / f0 - 1.0))
+            exposed += 1
+            closing = active.exit_i is not None and i == active.exit_i
+            if closing:
+                v *= 1.0 - active.leverage * cost.one_way_rate(index_close[i])
+            nav[i] = v
+            if closing:
+                detail.append(FuturesTrade(
+                    entry_date=dates[active.entry_i], exit_date=dates[i],
+                    entry_index=active.entry_index, entry_futures=f0,
+                    exit_futures=continuous[i], leverage=active.leverage,
+                    stop_distance=active.stop_distance,
+                    futures_return=continuous[i] / f0 - 1.0,
+                    ret=v / eq_at_entry - 1.0))
+                equity, active, holding_core = v, None, False
+            continue
+
+        if i > 0 and holding_core:                 # 昨收就持有核心 → 賺今天
+            equity *= 1.0 + core_leverage * (continuous[i] / continuous[i - 1] - 1.0)
+            exposed += 1
+
+        e = by_entry.get(i)
+        if e is not None:                          # 今收轉進策略部位
+            if holding_core:
+                equity *= 1.0 - core_leverage * cost.one_way_rate(index_close[i])
+                holding_core = False
+            active, eq_at_entry = e, equity
+            eq_after_cost = equity * (1.0 - e.leverage * cost.one_way_rate(index_close[i]))
+            f0 = continuous[i]
+            nav[i] = eq_after_cost
+            exposed += 1
+            continue
+
+        if on[i] != holding_core:                  # 核心進出，各付一次成本
+            equity *= 1.0 - core_leverage * cost.one_way_rate(index_close[i])
+            holding_core = on[i]
+        nav[i] = equity
+
+    if active is not None:
+        detail.append(FuturesTrade(
+            entry_date=dates[active.entry_i], exit_date=None,
+            entry_index=active.entry_index, entry_futures=f0,
+            exit_futures=continuous[-1], leverage=active.leverage,
+            stop_distance=active.stop_distance,
+            futures_return=continuous[-1] / f0 - 1.0,
+            ret=nav[-1] / eq_at_entry - 1.0))
+    return nav, detail, exposed / len(dates)

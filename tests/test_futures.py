@@ -298,5 +298,47 @@ class TestTrendFilterAndFixedLeverage(unittest.TestCase):
         self.assertAlmostEqual(det[0].ret, -0.30, places=9)
 
 
+class TestCoreOverlay(unittest.TestCase):
+    """空手期的核心部位 —— 時序錯了就是前視偏誤（docs/strategy.md §18）。"""
+
+    def _run(self, fut, ma, core=1.0, entries=(), idx=None):
+        from tw_backdraw.futures import core_overlay
+        ds = days(len(fut))
+        idx = idx if idx is not None else [105.0] * len(fut)
+        return core_overlay(ds, fut, list(entries), FREE, idx, core, ma)
+
+    def test_position_is_established_at_close_and_earns_from_the_next_bar(self):
+        """第 0 天收盤才建倉，所以第 0→1 天的漲幅不算 —— 用當天判斷賺當天是前視。"""
+        nav, _, _ = self._run([100.0, 110.0, 121.0], [100.0] * 3)
+        self.assertAlmostEqual(nav[0], 1.0)
+        self.assertAlmostEqual(nav[1], 1.10)      # D0 收盤建倉 → 賺 D1
+        self.assertAlmostEqual(nav[2], 1.21)
+
+    def test_no_position_while_below_the_average(self):
+        nav, _, ex = self._run([100.0, 200.0, 400.0], [1000.0] * 3)
+        self.assertEqual(nav, [1.0, 1.0, 1.0])
+        self.assertEqual(ex, 0.0)
+
+    def test_undefined_average_means_flat(self):
+        nav, _, _ = self._run([100.0, 110.0], [None, None])
+        self.assertEqual(nav, [1.0, 1.0])
+
+    def test_core_is_daily_rebalanced_constant_leverage(self):
+        """0.5x 每日再平衡：兩天各 +10% → 1.05² 而非 1 + 0.5×21%。"""
+        nav, _, _ = self._run([100.0, 110.0, 121.0], [100.0] * 3, core=0.5)
+        self.assertAlmostEqual(nav[2], 1.05 ** 2)
+
+    def test_strategy_position_replaces_the_core(self):
+        """有訊號時先平掉核心，改抱策略部位；核心不算成交易筆數。"""
+        from tw_backdraw.futures import FuturesEntry
+        e = FuturesEntry(entry_i=1, exit_i=3, leverage=2.0,
+                         entry_index=105.0, stop_distance=0.05)
+        fut = [100.0, 100.0, 110.0, 121.0]
+        nav, det, _ = self._run(fut, [100.0] * 4, core=1.0, entries=[e])
+        self.assertEqual(len(det), 1)
+        # 進場時權益 1.0（D0→D1 期貨沒動），之後 2 倍吃 21%
+        self.assertAlmostEqual(det[0].ret, 2.0 * 0.21, places=9)
+
+
 if __name__ == "__main__":
     unittest.main()

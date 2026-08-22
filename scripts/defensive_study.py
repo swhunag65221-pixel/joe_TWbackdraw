@@ -30,12 +30,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from tx_data import load_tx, login                                  # noqa: E402
 from tw_backdraw.config import PRESETS                              # noqa: E402
 from tw_backdraw.engine import Engine                               # noqa: E402
-from tw_backdraw.futures import (FuturesCost, entries_from_trades,  # noqa: E402
-                                 fixed_leverage, trade_details,
-                                 trend_filter, vehicle_series)
+from tw_backdraw.engine import moving_average                      # noqa: E402
+from tw_backdraw.futures import (FuturesCost, core_overlay,        # noqa: E402
+                                 entries_from_trades, fixed_leverage,
+                                 trade_details, trend_filter, vehicle_series)
 
 COST = FuturesCost()
 MA = 200
+CORE = 0.5          # 空手期的核心部位槓桿（docs/coverage.md 驗收後保留的改良）
 LEVS = (3.0, 4.0, 5.0, 6.0, 7.0)
 PERIODS = (("全期 1999–2026", date(1999, 1, 1), date(2027, 1, 1)),
            ("前段 1999–2012", date(1999, 1, 1), date(2013, 1, 1)),
@@ -48,13 +50,23 @@ class Book:
         self.bars, self.fs, _ = load_tx()
         self.dates = [b.d for b in self.bars]
         self.ic = [b.close for b in self.bars]
+        self.ma = moving_average(self.bars, MA)
         res = Engine(self.cfg).run(self.bars, self.fs)
         self.base = entries_from_trades(res.trades, self.bars, self.cfg, 5.0,
                                         same_day=True)
         self.filtered = trend_filter(self.base, self.bars, MA, below=True)
 
-    def measure(self, entries, lo=None, hi=None) -> dict:
-        nav, det = vehicle_series(self.dates, self.fs, entries, COST, self.ic)
+    def measure(self, entries, lo=None, hi=None, core: float = 0.0) -> dict:
+        if core:
+            nav, det, expo = core_overlay(self.dates, self.fs, entries, COST,
+                                          self.ic, core, self.ma)
+        else:
+            nav, det = vehicle_series(self.dates, self.fs, entries, COST, self.ic)
+            held = set()
+            for e in entries:
+                b = e.exit_i if e.exit_i is not None else len(self.dates) - 1
+                held.update(range(e.entry_i, b + 1))
+            expo = len(held) / len(self.dates)
         lo = lo or self.dates[0]
         hi = hi or (self.dates[-1].replace(year=self.dates[-1].year + 1))
         idx = [i for i, d in enumerate(self.dates) if lo <= d < hi]
@@ -69,7 +81,7 @@ class Book:
             dd = min(dd, x / peak - 1) if peak > 0 else dd
         cagr = seg[-1] ** (1 / years) - 1 if seg[-1] > 0 else -1.0
         rt = [t.ret for t in det if lo <= t.entry_date < hi] or [0.0]
-        return dict(n=len(rt), win=sum(1 for x in rt if x > 0) / len(rt),
+        return dict(n=len(rt), ex=expo, win=sum(1 for x in rt if x > 0) / len(rt),
                     cagr=cagr, mdd=dd, calmar=cagr / abs(dd) if dd else 0.0,
                     sharpe=(st.fmean(r) / st.pstdev(r) * math.sqrt(252)
                             if len(r) > 1 and st.pstdev(r) else 0.0),
@@ -77,15 +89,15 @@ class Book:
                     ruin=min(nav) <= 0.0, det=det, nav=nav)
 
 
-HEAD = (f'{"方案":<24}{"筆":>4}{"勝率":>7}{"CAGR":>8}{"MDD":>9}'
+HEAD = (f'{"方案":<26}{"筆":>4}{"在場":>6}{"勝率":>7}{"CAGR":>8}{"MDD":>9}'
         f'{"Sharpe":>8}{"Calmar":>8}{"最差單筆":>10}{">8%":>5}')
 
 
 def row(nm, m):
     flag = "  ⚠️爆倉" if m["ruin"] else ""
-    return (f'{nm:<24}{m["n"]:>4}{m["win"]:>7.0%}{m["cagr"]:>8.1%}{m["mdd"]:>9.1%}'
-            f'{m["sharpe"]:>8.2f}{m["calmar"]:>8.2f}{m["worst"]:>10.1%}'
-            f'{m["over"]:>5}{flag}')
+    return (f'{nm:<26}{m["n"]:>4}{m["ex"]:>6.0%}{m["win"]:>7.0%}{m["cagr"]:>8.1%}'
+            f'{m["mdd"]:>9.1%}{m["sharpe"]:>8.2f}{m["calmar"]:>8.2f}'
+            f'{m["worst"]:>10.1%}{m["over"]:>5}{flag}')
 
 
 def main() -> int:
@@ -108,6 +120,16 @@ def main() -> int:
     for L in LEVS:
         print("  " + row(f"固定 {L:g}x", bk.measure(fixed_leverage(bk.base, L))))
 
+    print(f"\n【2b】再加上空手期的核心部位 {CORE:g}x（收盤 > MA{MA}）\n")
+    print("  逆勢濾網只在收盤低於均線時進場，核心只在高於均線時持有 —— 兩者互斥。")
+    print("  核心是每日再平衡的固定槓桿，與策略部位的固定口數不同。\n")
+    print(HEAD)
+    print(row("現行（無濾網、無核心）", bk.measure(bk.base)))
+    print(row(f"濾網 ＋ 風險式 ＋ 核心", bk.measure(bk.filtered, core=CORE)))
+    for L in LEVS:
+        print(row(f"濾網 ＋ 固定 {L:g}x ＋ 核心",
+                  bk.measure(fixed_leverage(bk.filtered, L), core=CORE)))
+
     print(f"\n【3】前後段檢驗 —— 後見之明的濾網唯一站得住的理由\n")
     for lab, lo, hi in PERIODS:
         print(f"  {lab}")
@@ -117,6 +139,10 @@ def main() -> int:
         for L in (3.0, 5.0, 7.0):
             print("  " + row(f"濾網 ＋ 固定 {L:g}x",
                              bk.measure(fixed_leverage(bk.filtered, L), lo, hi)))
+        for L in (3.0, 5.0):
+            print("  " + row(f"濾網 ＋ 固定 {L:g}x ＋ 核心",
+                             bk.measure(fixed_leverage(bk.filtered, L), lo, hi,
+                                        core=CORE)))
         print()
 
     print("【4】通過濾網的逐筆交易，各槓桿下的權益報酬\n")
