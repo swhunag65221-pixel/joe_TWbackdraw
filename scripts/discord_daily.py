@@ -114,6 +114,20 @@ class Daily:
             return None
         return self.setups[-1]
 
+    def exit_signal_today(self):
+        """今天收盤已經跌破出場線 —— 引擎的賣單要隔一根 K 才成交，
+        所以 `closed_today` 在訊號當天還是空的，必須另外判斷。"""
+        t = self.open_trade
+        if t is None:
+            return None
+        c = self.last.close
+        stop, _ = self.trail_stop(t)
+        if stop is not None and c < stop:
+            return stop, f"移動停利（自波段最高收盤回檔 {self.cfg.exit.trail_drawdown:.0%}）"
+        if c < t.levels.stop_line:
+            return t.levels.stop_line, "跌破停損線"
+        return None
+
     @property
     def opened_today(self) -> bool:
         t = self.open_trade
@@ -133,6 +147,13 @@ class Daily:
         c = self.last.close
         t = self.open_trade
         cfg = self.cfg
+
+        hit = self.exit_signal_today()
+        if hit is not None:
+            line, why = hit
+            return ("🔴 今天已觸發出場",
+                    f"**收盤 {c:,.0f} 已跌破 {line:,.0f}（{why}）**\n"
+                    f"→ 今日 13:45 前全數平倉；若已錯過，明天開盤補平。", RED)
 
         if t is not None:
             lv = t.levels
@@ -393,7 +414,8 @@ class Daily:
 
     def has_action(self) -> bool:
         """明天是否有實際可能被觸發的點位（用於 --only-if-action）。"""
-        if self.fired_today or self.opened_today or self.closed_today:
+        if (self.fired_today or self.opened_today or self.closed_today
+                or self.exit_signal_today()):
             return True
         t = self.open_trade
         if t is not None:
@@ -409,7 +431,90 @@ class Daily:
         return False
 
     # ---- Discord payload ----
-    def payload(self) -> dict:
+    # ---- 精簡版：13:30 只需要看這幾行 ----
+    def compact(self) -> tuple[str, str, int]:
+        c = self.last.close
+        t = self.open_trade
+        cfg = self.cfg
+        head = [f"`{self.last.d}` 收 **{c:,.0f}**"]
+        rows: list[str] = []
+
+        fired = self.fired_today
+        if fired is not None:
+            lv = build_levels(fired.peak, fired.trough, cfg.levels)
+            cost = self.lot_cost(c, lv.stop_line)
+            return ("🟢 今天觸發進場",
+                    "\n".join(head + ["",
+                        f"**今日收盤買進，每口 {cost:,.0f}**"
+                        f"（口數 = 權益 ÷ {cost:,.0f}，捨去）",
+                        f"停損 **{lv.stop_line:,.0f}**（{lv.stop_line / c - 1:+.1%}）"
+                        f"　失效 {lv.invalidation:,.0f}", "",
+                        f"回檔 {fired.drop_pct:.1%}，"
+                        f"{fired.bars_to_repair} 日補回 {fired.repair_fraction:.0%}"]),
+                    GREEN)
+        d0 = self.closed_today
+        hit = self.exit_signal_today()
+        if d0 or hit:
+            if d0:
+                why, ret, held = d0.exit_reason, d0.trade.ret, d0.bars_held
+            else:
+                line, why = hit
+                why = f"{why} {line:,.0f}"
+                ret, held = t.trade.ret, t.bars_held
+            return ("🔴 今天出場",
+                    "\n".join(head + ["", f"**今日收盤全數平倉** —— {why}",
+                        f"本筆 **{ret:+.1%}**（持有 {held} 日）"]), RED)
+
+        if t is not None:
+            lv = t.levels
+            tr = t.trade
+            stop, _ = self.trail_stop(t)
+            binding = max(lv.stop_line, stop) if stop is not None else lv.stop_line
+            rows.append(f"🔴 跌破 **{binding:,.0f}**（{binding / c - 1:+.1%}）→ 13:45 前平倉")
+            if stop is None:
+                rows.append(f"⬆️ 站上 **{t.setup.peak:,.0f}**"
+                            f"（{t.setup.peak / c - 1:+.1%}）→ 啟動移動停利")
+            rows.append("🟡 其餘 → 不動作")
+            tail = (f"持有 `{tr.entry_date:%m-%d}` 進場 · {tr.leverage:.2f}x · "
+                    f"**{tr.ret:+.1%}** · 每口 {self.lot_cost(tr.entry_index, lv.stop_line):,.0f}")
+            colour = YELLOW if c / binding - 1 < 0.02 else GREEN
+            title = "🟡 續抱" if colour == GREEN else "🟠 貼近出場線"
+            return (title, "\n".join(head + [""] + rows + ["", tail]), colour)
+
+        w = self.live
+        if w is not None and w.state == "drawdown" and w.bars_left > 0:
+            lv = build_levels(w.peak, w.trough, cfg.levels)
+            trig = w.trigger_close(cfg.setup)
+            head[0] += f" · 視窗剩 **{w.bars_left - 1}** 日"
+            rows = [
+                f"🟢 站上 **{trig:,.0f}**（{trig / c - 1:+.1%}）→ 買進，"
+                f"每口 {self.lot_cost(trig, lv.stop_line):,.0f}",
+                f"🔻 跌破 **{w.trough:,.0f}**（{w.trough / c - 1:+.1%}）→ 破底重來",
+                "⚪ 其餘 → 不動作",
+            ]
+            tail = (f"口數 = 權益 ÷ [(收盤 − {lv.stop_line:,.0f}) × {self.per_point:.0f}]，捨去"
+                    f"　進場後停損 {lv.stop_line:,.0f}")
+            colour = GREEN if trig / c - 1 < 0.01 else BLUE
+            return ("⚪ 追蹤中", "\n".join(head + [""] + rows + ["", tail]), colour)
+
+        if w is not None and w.state == "expired":
+            return ("⚪ 空手", "\n".join(head + ["", f"上一段已過期，"
+                    f"收盤重新站上 **{w.peak:,.0f}**（{w.peak / c - 1:+.1%}）才重新追蹤"]), GREY)
+
+        anchor = w.peak if w else c
+        start = anchor * (1 - cfg.setup.min_drawdown)
+        return ("⚪ 空手", "\n".join(head + ["", "明天不會有訊號",
+                f"🔻 跌破 **{start:,.0f}**（{start / c - 1:+.1%}）→ 開始追蹤新的一段"]), GREY)
+
+    def payload(self, full: bool = False) -> dict:
+        note = f"{self.note}\n" if self.note else ""
+        if not full:
+            title, body, colour = self.compact()
+            return {"embeds": [{"title": title, "description": note + body,
+                                "color": colour,
+                                "footer": {"text": "13:30 比對收盤價，13:45 前下單"
+                                                   "　|　--full 看完整版"}}]}
+
         title, body, colour = self.tomorrow_plan()
         fields = [
             {"name": "① 明天 13:30 比對收盤價", "value": body, "inline": False},
@@ -426,10 +531,9 @@ class Daily:
         if self.missing:
             foot += f"　|　⚠️ {len(self.missing)} 個換倉日缺次月報價"
         return {"embeds": [{
-            "title": f"{title}",
-            "description": (f"{self.note}\n" if self.note else "")
-                           + f"依據 **{self.last.d}** 收盤 "
-                             f"**{self.last.close:,.2f}**　→　下一個交易日的作法",
+            "title": title,
+            "description": note + f"依據 **{self.last.d}** 收盤 "
+                                  f"**{self.last.close:,.2f}**　→　下一個交易日的作法",
             "color": colour,
             "fields": fields,
             "footer": {"text": foot},
@@ -449,10 +553,10 @@ def post(url: str, payload: dict) -> None:
 def render_text(p: dict) -> str:
     e = p["embeds"][0]
     out = [e["title"], e["description"], ""]
-    for f in e["fields"]:
+    for f in e.get("fields", []):
         out += [f"── {f['name']} ──", f["value"], ""]
     out.append(e["footer"]["text"])
-    return "\n".join(out).replace("**", "")
+    return "\n".join(out).replace("**", "").replace("`", "")
 
 
 def main() -> int:
@@ -467,6 +571,8 @@ def main() -> int:
                     help="資料落後超過這麼多天就警告")
     ap.add_argument("--as-of", default=None, metavar="YYYY-MM-DD",
                     help="依據某一天的收盤回放（驗證用）")
+    ap.add_argument("--full", action="store_true",
+                    help="完整版（六個區塊）。預設是只有觸發點位的精簡版")
     ap.add_argument("--note", default="",
                     help="在訊息開頭加一行提示，例如標明這是回放而非即時訊號")
     args = ap.parse_args()
@@ -485,7 +591,7 @@ def main() -> int:
         print(f"{d.last.d} 沒有動作也沒有接近觸發，不送出。")
         return 0
 
-    p = d.payload()
+    p = d.payload(args.full)
     if args.dry_run or not args.webhook:
         if not args.webhook and not args.dry_run:
             print("未設定 DISCORD_WEBHOOK_URL，改為只印出：\n", file=sys.stderr)
