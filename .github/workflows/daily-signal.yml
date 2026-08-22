@@ -1,0 +1,38 @@
+name: 每日訊號 → Discord
+
+# 加權指數 13:30(台北) 收盤、台指期 13:45 收盤 —— 動作要在這 15 分鐘內完成。
+# 05:31 UTC = 13:31 台北。⚠️ GitHub Actions 的排程有數分鐘到數十分鐘的延遲，
+# 無法保證趕上 13:45，所以這個 workflow 的定位是**紀錄與備援**；
+# 真的要照訊號下單，請用自己的機器 cron（見 docs/discord.md）。
+on:
+  schedule:
+    - cron: "31 5 * * 1-5"      # 週一至週五，指數收盤後
+    - cron: "5 6 * * 1-5"       # 期貨收盤後再送一次，作為當日定稿
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: "回放某一天（YYYY-MM-DD），留空則用最新資料"
+        required: false
+      dry_run:
+        description: "只印出不送出"
+        type: boolean
+        default: false
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet finlab pandas tzdata
+      - name: 送出每日訊號
+        env:
+          Finlab_API_token: ${{ secrets.FINLAB_API_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python3 scripts/discord_daily.py \
+            ${{ inputs.as_of && format('--as-of {0}', inputs.as_of) || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}

@@ -499,5 +499,64 @@ class TestLeveraged(unittest.TestCase):
         self.assertLess(path[-1], 100.0)
 
 
+class TestLiveState(unittest.TestCase):
+    """偵測器的即時狀態 —— 每日訊號報告靠它，不能與回測判定分家。"""
+
+    def _bars(self, closes):
+        from tw_backdraw.bars import Bar
+        return [Bar(d=date(2020, 1, 1) + timedelta(days=i), open=c, high=c,
+                    low=c, close=c) for i, c in enumerate(closes)]
+
+    def _live(self, closes, cfg=None):
+        from tw_backdraw.config import DEFAULT_CONFIG
+        from tw_backdraw.setup import scan_episodes
+        out = []
+        scan_episodes(self._bars(closes), cfg or DEFAULT_CONFIG.setup, out)
+        return out[0]
+
+    def test_flat_market_reports_normal_and_the_peak_anchor(self):
+        w = self._live([100, 101, 102, 103])
+        self.assertEqual(w.state, "normal")
+        self.assertEqual(w.peak, 103)
+        self.assertIsNone(w.trough)
+
+    def test_pullback_reports_progress_and_trigger_price(self):
+        from tw_backdraw.config import DEFAULT_CONFIG
+        cfg = DEFAULT_CONFIG.setup                       # 門檻 10%、補回 60%
+        w = self._live([100, 88, 90], cfg)               # 跌到 88 再回到 90
+        self.assertEqual(w.state, "drawdown")
+        self.assertAlmostEqual(w.peak, 100)
+        self.assertAlmostEqual(w.trough, 88)
+        self.assertAlmostEqual(w.drop_pct, 0.12)
+        self.assertAlmostEqual(w.repair_fraction, 2 / 12)
+        self.assertEqual(w.bars_since_trough, 1)
+        # 觸發價 = 谷底 + 60% × 跌幅
+        self.assertAlmostEqual(w.trigger_close(cfg), 88 + 0.6 * 12)
+
+    def test_trigger_price_is_none_when_not_tracking(self):
+        from tw_backdraw.config import DEFAULT_CONFIG
+        w = self._live([100, 101, 102])
+        self.assertIsNone(w.trigger_close(DEFAULT_CONFIG.setup))
+
+    def test_bars_left_counts_down_the_repair_window(self):
+        from tw_backdraw.config import DEFAULT_CONFIG
+        cfg = DEFAULT_CONFIG.setup
+        w = self._live([100, 88] + [89] * 4, cfg)
+        self.assertEqual(w.bars_since_trough, 4)
+        self.assertEqual(w.bars_left, cfg.max_repair_bars - 4)
+
+    def test_live_state_matches_a_fired_setup(self):
+        """補回 ≥60% 的那一根，狀態應轉為 engaged 且產生訊號。"""
+        from tw_backdraw.config import DEFAULT_CONFIG
+        from tw_backdraw.setup import detect_setups
+        cfg = DEFAULT_CONFIG.setup
+        closes = [100, 88, 96]                            # 96 = 補回 8/12 = 67%
+        w = self._live(closes, cfg)
+        self.assertEqual(w.state, "engaged")
+        setups = detect_setups(self._bars(closes), cfg)
+        self.assertEqual(len(setups), 1)
+        self.assertAlmostEqual(setups[0].trigger_close, 96)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -270,6 +270,7 @@ scripts/
   weight_rule_study.py UPRO/TQQQ 水位規則檢驗（docs/strategy.md §15）
   tx_evaluation.py 台指期策略全面體檢（docs/tx_evaluation.md）
   coverage_study.py 增加筆數／在場時間的五個方案比較（docs/coverage.md）
+  discord_daily.py 每日訊號推送到 Discord（docs/discord.md）
   train_test_best.py 切一個時點，訓練段選參數、測試段驗收
   fetch_taifex_rolls.py 期交所分月合約收盤價（算換倉價差用）
   make_futures_script.py 單檔可執行的台指期回測腳本產生器
@@ -281,6 +282,7 @@ docs/etf_trades_2018_2026.md      UPRO / TQQQ 逐筆交易明細（2018–2026�
 docs/allocation.md                三個市場之間的資金配置分析
 docs/tx_evaluation.md             台指期策略全面體檢（指標選擇＋優缺點）
 docs/coverage.md                  五種增加進出場機會與在場時間的方案
+docs/discord.md                   每日訊號推送到 Discord 的設定與時間窗
 tests/             單元測試
 ```
 

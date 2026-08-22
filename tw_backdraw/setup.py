@@ -76,10 +76,47 @@ class FastRepairSetup:
         )
 
 
-def scan_episodes(bars: list[Bar], cfg: SetupConfig) -> list[Episode]:
+@dataclass(frozen=True)
+class LiveState:
+    """偵測器跑到最後一根 K 的當下狀態 —— 每日訊號報告用。
+
+    直接從 `scan_episodes()` 的同一個迴圈取得，不另外實作一份，
+    所以盤中看到的「還差多少觸發」與回測的判定必然一致。
+    """
+
+    state: str                   # normal / drawdown / expired / engaged
+    peak: float
+    peak_date: date
+    trough: float | None         # 只有 drawdown 狀態才有
+    trough_date: date | None
+    bars_since_trough: int | None
+    repair_fraction: float | None    # 目前補回幾成
+    best_in_window: float | None     # 視窗內補回過的最高比例
+    lower_lows: int
+    bars_left: int | None            # 修復視窗還剩幾個交易日
+
+    @property
+    def drop_pct(self) -> float | None:
+        if self.trough is None or self.peak <= 0:
+            return None
+        return (self.peak - self.trough) / self.peak
+
+    def trigger_close(self, cfg: SetupConfig) -> float | None:
+        """再收在多少以上就會觸發訊號。"""
+        if self.state != "drawdown" or self.trough is None:
+            return None
+        return self.trough + cfg.repair_fraction * (self.peak - self.trough)
+
+
+def scan_episodes(bars: list[Bar], cfg: SetupConfig,
+                  live: list | None = None) -> list[Episode]:
     """列出所有 ≥ `min_drawdown` 的回檔段落，含觸發與未觸發的原因。
 
     `detect_setups()` 就是取這裡面 `fired=True` 的那些，所以兩者不會不一致。
+
+    傳入 `live=[]` 時，會把跑到最後一根 K 的 `LiveState` 追加進去 ——
+    每日訊號報告靠這個取得「目前追蹤到哪、還差多少觸發」，
+    而不是另外複製一份狀態機。
     """
     episodes: list[Episode] = []
     if not bars:
@@ -161,6 +198,25 @@ def scan_episodes(bars: list[Bar], cfg: SetupConfig) -> list[Episode]:
                 if c > peak:
                     peak, peak_i = c, i
             continue
+
+    if live is not None and bars:
+        i = len(bars) - 1
+        if state == "drawdown":
+            elapsed = i - trough_i
+            drop = peak - trough
+            live.append(LiveState(
+                state=state, peak=peak, peak_date=bars[peak_i].d,
+                trough=trough, trough_date=bars[trough_i].d,
+                bars_since_trough=elapsed,
+                repair_fraction=(bars[i].close - trough) / drop if drop > 0 else 0.0,
+                best_in_window=win_best, lower_lows=lower_lows,
+                bars_left=max(cfg.max_repair_bars - elapsed, 0)))
+        else:
+            live.append(LiveState(
+                state=state, peak=peak, peak_date=bars[peak_i].d,
+                trough=None, trough_date=None, bars_since_trough=None,
+                repair_fraction=None, best_in_window=None,
+                lower_lows=0, bars_left=None))
 
     return episodes
 
