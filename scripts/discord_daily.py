@@ -175,13 +175,12 @@ class Daily:
             lv = build_levels(w.peak, w.trough, cfg.levels)
             rows = [
                 f"🟢 收盤 **≥ {trig:,.0f}**（{pct(trig / c - 1)}）"
-                f"　→　13:45 前**買進，槓桿約 {lev:.2f}x**"
-                f"（每 {trig * MTX_POINT / lev:,.0f} 元 1 口小台）",
+                f"　→　13:45 前**買進**，"
+                f"每 **{self.lot_cost(trig, lv.stop_line):,.0f}** 元 1 口小台"
+                f"（槓桿約 {lev:.2f}x）",
                 f"　　_進場後停損線 {lv.stop_line:,.0f}、失效線 {lv.invalidation:,.0f}，"
                 f"兩條都已固定，不隨進場價變動。_",
-                f"　　_收得越高、離停損越遠，槓桿會自動降低："
-                + "；".join(f"收 {x:,.0f} → {futures_leverage(x, lv, cfg, self.max_leverage):.2f}x"
-                            for x in (trig, trig * 1.01, trig * 1.02)) + "。_",
+                f"　　_收得越高、離停損越遠，每口要的錢就越多 —— 見下方速查表。_",
                 f"🔻 收盤 **< {w.trough:,.0f}**（{pct(w.trough / c - 1)}）"
                 f"　→　破底，谷底與計時**全部重來**，觸發價跟著下移",
                 f"⚪ 介於兩者之間　→　**不動作**，視窗剩 **{w.bars_left - 1}** 個交易日",
@@ -216,58 +215,72 @@ class Daily:
         """在這個槓桿下，一口小台需要多少權益。"""
         return self.last.close * MTX_POINT / leverage
 
-    def formula(self) -> str:
-        """槓桿怎麼算 —— 每天都附，讓你能自己驗算而不是只相信數字。"""
-        cfg = self.cfg
-        risk = cfg.sizing.risk_per_trade
-        head = [
-            f"```",
-            f"主防線   = 谷底 + {cfg.levels.half_line_ratio:.0%} × (前高 − 谷底)",
-            f"停損線   = min(警戒線, 主防線 × {1 - cfg.levels.half_line_buffer:.3f})",
-            f"停損距離 = (進場收盤 − 停損線) ÷ 進場收盤",
-            f"槓桿     = {risk:.0%} ÷ 停損距離　（上限 {self.max_leverage:g}x）",
-            f"每口小台 = 進場收盤 × {MTX_POINT:g} ÷ 槓桿",
-        ]
+    #: 每口小台所需權益 = 每點價值 ÷ 風險預算 × (收盤 − 停損線)
+    #: 這個係數與收盤價無關，所以「收盤 − 停損線」乘上它就是答案。
+    @property
+    def per_point(self) -> float:
+        return MTX_POINT / self.cfg.sizing.risk_per_trade      # 50 ÷ 8% = 625
 
+    def cap_below(self, stop_line: float) -> float:
+        """低於這個收盤價，槓桿會撞到上限，改用「收盤 × 每點價值 ÷ 上限」。"""
+        m = self.max_leverage
+        return stop_line * m / (m - self.cfg.sizing.risk_per_trade)
+
+    def lot_cost(self, close: float, stop_line: float) -> float:
+        """在這個收盤價下，一口小台需要多少權益。"""
+        if close < self.cap_below(stop_line):
+            return close * MTX_POINT / self.max_leverage
+        return self.per_point * (close - stop_line)
+
+    def sizing(self) -> str:
+        """收盤後只要做一次減法、一次乘法就能算出口數。"""
+        k = self.per_point
         t = self.open_trade
-        if t is not None:
-            lv, tr = t.levels, t.trade
-            e = tr.entry_index
-            dist = (e - lv.stop_line) / e
-            head += [
-                "",
-                f"目前部位（{tr.entry_date} 進場）",
-                f"  主防線   = {lv.trough:,.0f} + {cfg.levels.half_line_ratio:.0%}"
-                f" × ({lv.peak:,.0f} − {lv.trough:,.0f}) = {lv.half_line:,.0f}",
-                f"  停損線   = {lv.stop_line:,.0f}",
-                f"  停損距離 = ({e:,.0f} − {lv.stop_line:,.0f}) ÷ {e:,.0f}"
-                f" = {dist:.2%}",
-                f"  槓桿     = {risk:.0%} ÷ {dist:.2%} = {tr.leverage:.2f}x",
-                f"  每口小台 = {e:,.0f} × {MTX_POINT:g} ÷ {tr.leverage:.2f}"
-                f" = {e * MTX_POINT / tr.leverage:,.0f} 元",
-            ]
-            head.append("```")
-            return "\n".join(head)
+        stop = (t.levels.stop_line if t is not None else None)
+        if stop is None:
+            w = self.live
+            if w is None or w.state != "drawdown" or w.bars_left <= 0:
+                return (f"目前沒有可進場的劇本，暫時用不到。\n"
+                        f"_通則：每口小台需要 =（收盤 − 停損線）× {k:.0f}_")
+            stop = build_levels(w.peak, w.trough, self.cfg.levels).stop_line
 
-        w = self.live
-        if w is not None and w.state == "drawdown" and w.bars_left > 0:
-            lv = build_levels(w.peak, w.trough, cfg.levels)
-            trig = w.trigger_close(cfg.setup)
-            lev = futures_leverage(trig, lv, cfg, self.max_leverage)
-            dist = (trig - lv.stop_line) / trig
-            head += [
-                "",
-                f"這一段回檔（前高 {w.peak:,.0f}、谷底 {w.trough:,.0f}）",
-                f"  主防線   = {lv.half_line:,.0f}　停損線 = {lv.stop_line:,.0f}（已固定）",
-                f"  若收在觸發價 {trig:,.0f}：",
-                f"    停損距離 = ({trig:,.0f} − {lv.stop_line:,.0f}) ÷ {trig:,.0f}"
-                f" = {dist:.2%}",
-                f"    槓桿     = {risk:.0%} ÷ {dist:.2%} = {lev:.2f}x",
-                f"    每口小台 = {trig * MTX_POINT / lev:,.0f} 元",
-                f"  收更高則停損距離變大、槓桿自動變小（明天用實際收盤價重算）",
-            ]
-        head.append("```")
-        return "\n".join(head)
+        cap = self.cap_below(stop)
+        lines = [
+            "```",
+            f"停損線 {stop:,.0f}　（今晚已定，明天不變）",
+            "",
+            f"每口小台需要 =（收盤 − {stop:,.0f}）× {k:.0f}",
+            f"口　　　數   = 你的權益 ÷ 上面那個數，無條件捨去",
+            "```",
+        ]
+        if t is not None:
+            e = t.trade.entry_index
+            cost = self.lot_cost(e, stop)
+            lines.append(
+                f"核對手上的部位：({e:,.0f} − {stop:,.0f}) × {k:.0f} = "
+                f"**{cost:,.0f}** 元/口　（＝槓桿 {t.trade.leverage:.2f}x）")
+            return "\n".join(lines)
+
+        trig = self.live.trigger_close(self.cfg.setup)
+        rows = ["```", f"{'明天收盤':>9}{'每口需要':>11}{'100萬':>7}{'300萬':>7}{'500萬':>7}"]
+        for c in (trig, trig * 1.005, trig * 1.01, trig * 1.02, trig * 1.03):
+            cost = self.lot_cost(c, stop)
+            rows.append(f"{c:>9,.0f}{cost:>11,.0f}"
+                        + "".join(f"{int(cap_ // cost):>7}"
+                                 for cap_ in (1e6, 3e6, 5e6)))
+        rows.append("```")
+        lines += ["速查表（觸發價起算）"] + rows
+        lv2 = build_levels(self.live.peak, self.live.trough, self.cfg.levels)
+        if futures_leverage(trig, lv2, self.cfg, self.max_leverage) >= self.max_leverage * 0.9:
+            lines.append(f"⚠️ 停損很近，槓桿已接近 {self.max_leverage:g}x 上限。"
+                         f"收盤低於 {cap:,.0f} 時改用「收盤 × "
+                         f"{MTX_POINT / self.max_leverage:.0f}」，"
+                         f"口數不再往上加。")
+        lines.append(f"_{k:.0f} = 小台每點 {MTX_POINT:g} 元 ÷ 風險預算 "
+                     f"{self.cfg.sizing.risk_per_trade:.0%}；"
+                     f"等價於「每筆最多虧掉權益的 "
+                     f"{self.cfg.sizing.risk_per_trade:.0%}」。_")
+        return "\n".join(lines)
 
     def today(self) -> str:
         """今天收盤該做的事（若你今天沒跑腳本，這裡補告訴你）。"""
@@ -400,7 +413,7 @@ class Daily:
         title, body, colour = self.tomorrow_plan()
         fields = [
             {"name": "① 明天 13:30 比對收盤價", "value": body, "inline": False},
-            {"name": "② 槓桿怎麼算", "value": self.formula(), "inline": False},
+            {"name": "② 收盤後怎麼算口數", "value": self.sizing(), "inline": False},
             {"name": "③ 今天發生了什麼", "value": self.today(), "inline": False},
             {"name": "④ 部位現況", "value": self.position(), "inline": False},
             {"name": "⑤ 劇本追蹤", "value": self.script(), "inline": False},
