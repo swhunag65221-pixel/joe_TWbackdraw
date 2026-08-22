@@ -18,11 +18,13 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 import random
 import statistics as st
 import sys
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,9 +95,22 @@ def profile(s: list[float], years: float) -> dict:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description="台指期策略體檢")
+    ap.add_argument("--start", default=None, metavar="YYYY-MM-DD",
+                    help="只餵這天之後的資料（偵測器的高點錨也從那裡重新起算）")
+    args = ap.parse_args()
+
     login()
     cfg = PRESETS["tuned"]
     bars, fs, _ = load_tx()
+    if args.start:
+        cut = date.fromisoformat(args.start)
+        keep = [i for i, b in enumerate(bars) if b.d >= cut]
+        if not keep:
+            raise SystemExit(f"{cut} 之後沒有資料")
+        bars, fs = bars[keep[0]:], fs[keep[0]:]
+        print(f"⚠ 只使用 {cut} 之後的資料 —— 更早的歷史完全不存在，"
+              f"包括它記錄過的所有大虧損。\n")
     dates, ic = [b.d for b in bars], [b.close for b in bars]
     res = Engine(cfg).run(bars, fs)
     ent = entries_from_trades(res.trades, bars, cfg, 5.0, same_day=True)
