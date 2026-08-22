@@ -11,10 +11,18 @@ on:
       as_of:
         description: "依據某一天的收盤回放（YYYY-MM-DD），留空則用最新資料"
         required: false
-      dry_run:
-        description: "只印出不送出"
+      full:
+        description: "完整版（六個區塊）"
         type: boolean
         default: false
+      dry_run:
+        description: "只印在 log，不送到 Discord"
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-signal
+  cancel-in-progress: false
 
 jobs:
   plan:
@@ -22,10 +30,29 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: 檢查 secrets
+        env:
+          TOKEN: ${{ secrets.FINLAB_API_TOKEN }}
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          missing=""
+          [ -z "$TOKEN" ] && missing="$missing FINLAB_API_TOKEN"
+          [ -z "$HOOK" ]  && missing="$missing DISCORD_WEBHOOK_URL"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少 repository secret:$missing"
+            echo "到 Settings → Secrets and variables → Actions 新增後再執行。" >&2
+            exit 1
+          fi
+          echo "secrets 齊全"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+
       - run: pip install --quiet finlab pandas tzdata
+
       - name: 產出明日作戰表
         env:
           Finlab_API_token: ${{ secrets.FINLAB_API_TOKEN }}
@@ -33,4 +60,27 @@ jobs:
         run: |
           python3 scripts/discord_daily.py \
             ${{ inputs.as_of && format('--as-of {0}', inputs.as_of) || '' }} \
+            ${{ inputs.full && '--full' || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: 失敗時通知 Discord
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -z "$HOOK" ] && exit 0
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          python3 - "$HOOK" "$run_url" <<'PY'
+          import json, sys, urllib.request
+          hook, url = sys.argv[1], sys.argv[2]
+          body = {"embeds": [{
+              "title": "⚠️ 明日作戰表產生失敗",
+              "description": f"今晚沒有作戰表。[查看 log]({url})\n"
+                             "明天 13:30 請自行比對上一則訊息的點位 —— "
+                             "停損線與觸發價不會因為這次失敗而改變。",
+              "color": 0xE74C3C}]}
+          req = urllib.request.Request(
+              hook, data=json.dumps(body).encode(),
+              headers={"Content-Type": "application/json"})
+          urllib.request.urlopen(req, timeout=30)
+          PY

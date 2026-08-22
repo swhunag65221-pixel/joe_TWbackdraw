@@ -156,20 +156,42 @@ UPRO / TQQQ 的部位不在這份通知裡（美股指數與 ETF 同時收盤，
 
 ## GitHub Actions 設定
 
-Settings → Secrets and variables → Actions 建立：
+workflow 已經在 repo 裡（`.github/workflows/daily-signal.yml`）且狀態是 active。
+**還差兩個 secret**，設好就會自己跑：
 
-| Secret | 內容 |
+Settings → Secrets and variables → Actions → New repository secret
+
+| Name | 內容 |
 |---|---|
 | `FINLAB_API_TOKEN` | FinLab 的 API token |
 | `DISCORD_WEBHOOK_URL` | Discord 頻道的 webhook URL |
 
 Discord webhook：頻道設定 → 整合 → Webhook → 新增 → 複製網址。
 
-排程是 `0 13 * * 0-4` UTC＝**台北時間週日至週四 21:00**，
-產出的是隔一個交易日的作戰表（週日晚上那次涵蓋週一）。
-排程延遲在這個設計下無所謂。
+排程 `0 13 * * 0-4` UTC ＝ **台北週日至週四 21:00**，產出隔一個交易日的作戰表
+（週日晚上那次涵蓋週一）。排程延遲在這個設計下無所謂。
 
-本機 cron（台北時區的機器）：
+也可以到 Actions 頁面手動觸發，三個選項：
+
+| 輸入 | 用途 |
+|---|---|
+| `as_of` | 依據某一天的收盤回放，訊息會自動標「這是回放」 |
+| `full` | 完整版（六個區塊） |
+| `dry_run` | 只印在 log，不送到 Discord |
+
+**內建的兩道保險**
+
+1. **secrets 缺一就先失敗**，並在 log 指出缺哪一個 —— 不會跑到一半才丟出
+   看不懂的 traceback。
+2. **產生失敗時會另外推一則紅色通知**到同一個頻道，附 log 連結，並提醒
+   「停損線與觸發價不會因為這次失敗而改變，請沿用上一則訊息的點位」。
+   靜默失敗才是最危險的 —— 你會以為今天沒事。
+
+⚠️ **排程只會從預設分支執行。** 本 repo 的預設分支就是
+`claude/taiwan-50-pullback-entry-nrm47k`，所以現況可用；
+若之後改了預設分支，記得把這個 workflow 一起帶過去。
+
+### 本機 cron（更可靠，也不用把 token 交給 GitHub）
 
 ```cron
 0 21 * * 0-4  cd /path/to/joe_TWbackdraw && \
