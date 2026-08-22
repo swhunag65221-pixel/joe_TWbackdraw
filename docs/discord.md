@@ -179,6 +179,13 @@ Discord webhook：頻道設定 → 整合 → Webhook → 新增 → 複製網�
 | `full` | 完整版（六個區塊） |
 | `dry_run` | 只印在 log，不送到 Discord |
 
+**⚠️ Discord 會擋 urllib 的預設 User-Agent**
+
+`Python-urllib/3.11` 這種預設 UA 會被 Discord 回 **403 Forbidden**。
+症狀很陰險：本機測試正常（因為腳本有設 UA），CI 才失敗。
+`scripts/discord_notify.py` 與 `discord_daily.py` 都有設，
+測試 `TestDiscordRequest` 會擋住這個回歸。自己另外寫送出邏輯時務必記得帶。
+
 **內建的兩道保險**
 
 1. **secrets 缺一就先失敗**，並在 log 指出缺哪一個 —— 不會跑到一半才丟出

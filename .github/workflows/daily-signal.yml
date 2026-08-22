@@ -46,10 +46,11 @@ jobs:
           fi
           echo "secrets 齊全"
 
+      # 不要加 cache: pip —— 這個 repo 沒有 requirements.txt / pyproject.toml，
+      # setup-python 找不到可雜湊的相依檔會讓步驟直接失敗（不只是警告）。
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - run: pip install --quiet finlab pandas tzdata
 
@@ -68,19 +69,12 @@ jobs:
         env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          [ -z "$HOOK" ] && exit 0
-          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          python3 - "$HOOK" "$run_url" <<'PY'
-          import json, sys, urllib.request
-          hook, url = sys.argv[1], sys.argv[2]
-          body = {"embeds": [{
-              "title": "⚠️ 明日作戰表產生失敗",
-              "description": f"今晚沒有作戰表。[查看 log]({url})\n"
-                             "明天 13:30 請自行比對上一則訊息的點位 —— "
-                             "停損線與觸發價不會因為這次失敗而改變。",
-              "color": 0xE74C3C}]}
-          req = urllib.request.Request(
-              hook, data=json.dumps(body).encode(),
-              headers={"Content-Type": "application/json"})
-          urllib.request.urlopen(req, timeout=30)
-          PY
+          if [ -z "$HOOK" ]; then
+            echo "沒有 webhook，略過通知"
+            exit 0
+          fi
+          python3 scripts/discord_notify.py \
+            --webhook "$HOOK" --color red \
+            --title "⚠️ 明日作戰表產生失敗" \
+            --text "今晚沒有作戰表。[查看 log]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+          明天 13:30 請自行比對上一則訊息的點位 —— 停損線與觸發價不會因為這次失敗而改變。"

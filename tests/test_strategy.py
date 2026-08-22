@@ -558,5 +558,53 @@ class TestLiveState(unittest.TestCase):
         self.assertAlmostEqual(setups[0].trigger_close, 96)
 
 
+class TestDiscordRequest(unittest.TestCase):
+    """Discord 對 urllib 的預設 User-Agent 回 403 —— 本機測得到、CI 才爆的那種。
+
+    這兩個測試不連網，只檢查送出的 Request 有沒有帶 UA。
+    """
+
+    def _req(self, build):
+        import urllib.request
+        captured = {}
+
+        def fake(req, timeout=None):
+            captured["req"] = req
+            raise AssertionError("stop")     # 不要真的送出
+
+        real = urllib.request.urlopen
+        urllib.request.urlopen = fake
+        try:
+            try:
+                build()
+            except AssertionError:
+                pass
+        finally:
+            urllib.request.urlopen = real
+        return captured.get("req")
+
+    def test_notify_sets_user_agent(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import discord_notify
+        req = self._req(lambda: discord_notify.send(
+            "https://discord.com/api/webhooks/x/y", "t", "d", 0))
+        self.assertIsNotNone(req)
+        self.assertTrue(req.get_header("User-agent"),
+                        "少了 User-Agent，Discord 會回 403")
+
+    def test_daily_post_sets_user_agent(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import discord_daily
+        req = self._req(lambda: discord_daily.post(
+            "https://discord.com/api/webhooks/x/y", {"content": "hi"}))
+        self.assertIsNotNone(req)
+        self.assertTrue(req.get_header("User-agent"),
+                        "少了 User-Agent，Discord 會回 403")
+
+
 if __name__ == "__main__":
     unittest.main()
