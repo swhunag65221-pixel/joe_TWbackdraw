@@ -443,14 +443,18 @@ class Daily:
         if fired is not None:
             lv = build_levels(fired.peak, fired.trough, cfg.levels)
             cost = self.lot_cost(c, lv.stop_line)
-            return ("🟢 今天觸發進場",
+            # 這則訊息在收盤後才送達，13:45 的下單窗口已經過了 ——
+            # 所以是「確認」而非「指示」，寫成命令句會讓人以為還來得及。
+            return ("🟢 今天已觸發進場",
                     "\n".join(head + ["",
-                        f"**今日收盤買進，每口 {cost:,.0f}**"
-                        f"（口數 = 權益 ÷ {cost:,.0f}，捨去）",
+                        f"✅ 依昨日作戰表，**應已在 13:45 前買進** —— "
+                        f"每口 {cost:,.0f}（口數 = 權益 ÷ {cost:,.0f}，捨去）",
                         f"停損 **{lv.stop_line:,.0f}**（{lv.stop_line / c - 1:+.1%}）"
-                        f"　失效 {lv.invalidation:,.0f}", "",
+                        f"　失效 {lv.invalidation:,.0f}",
                         f"回檔 {fired.drop_pct:.1%}，"
-                        f"{fired.bars_to_repair} 日補回 {fired.repair_fraction:.0%}"]),
+                        f"{fired.bars_to_repair} 日補回 {fired.repair_fraction:.0%}", "",
+                        "❗ 沒買到 → **放棄這一筆**，不要隔天追。"
+                        "進場價與停損距離都會偏離回測假設，風險更高。"]),
                     GREEN)
         d0 = self.closed_today
         hit = self.exit_signal_today()
@@ -461,9 +465,11 @@ class Daily:
                 line, why = hit
                 why = f"{why} {line:,.0f}"
                 ret, held = t.trade.ret, t.bars_held
-            return ("🔴 今天出場",
-                    "\n".join(head + ["", f"**今日收盤全數平倉** —— {why}",
-                        f"本筆 **{ret:+.1%}**（持有 {held} 日）"]), RED)
+            return ("🔴 今天已觸發出場",
+                    "\n".join(head + ["",
+                        f"✅ 依昨日作戰表，**應已在 13:45 前平倉** —— {why}",
+                        f"本筆 **{ret:+.1%}**（持有 {held} 日）", "",
+                        "❗ 沒賣掉 → **明天開盤立刻平倉**，不要等反彈。"]), RED)
 
         if t is not None:
             lv = t.levels
