@@ -10,6 +10,9 @@ python3 scripts/discord_daily.py --only-if-action    # 沒有可能觸發的點�
 python3 scripts/discord_daily.py --dry-run --as-of 2026-08-07   # 回放
 ```
 
+`--as-of` 的訊息會自動加上「⚠️ 這是回放，不是即時訊號」，免得跟真的訊號搞混。
+`--note "自訂文字"` 可以換掉那一行。
+
 ## 為什麼改成前一晚跑
 
 訊號以**加權指數 13:30 收盤**判定、成交在**當日台指期 13:45 收盤**，中間只有

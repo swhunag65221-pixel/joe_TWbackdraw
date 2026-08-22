@@ -59,9 +59,10 @@ def pct(x: float) -> str:
 
 class Daily:
     def __init__(self, cfg: StrategyConfig, max_leverage: float,
-                 as_of: date | None = None):
+                 as_of: date | None = None, note: str = ""):
         self.cfg = cfg
         self.max_leverage = max_leverage
+        self.note = note
         self.bars, self.fs, self.missing = load_tx()
         if as_of is not None:            # 回放歷史某一天，用來驗證訊息內容
             keep = [i for i, b in enumerate(self.bars) if b.d <= as_of]
@@ -359,8 +360,9 @@ class Daily:
             foot += f"　|　⚠️ {len(self.missing)} 個換倉日缺次月報價"
         return {"embeds": [{
             "title": f"{title}",
-            "description": f"依據 **{self.last.d}** 收盤 "
-                           f"**{self.last.close:,.2f}**　→　下一個交易日的作法",
+            "description": (f"{self.note}\n" if self.note else "")
+                           + f"依據 **{self.last.d}** 收盤 "
+                             f"**{self.last.close:,.2f}**　→　下一個交易日的作法",
             "color": colour,
             "fields": fields,
             "footer": {"text": foot},
@@ -397,12 +399,15 @@ def main() -> int:
     ap.add_argument("--stale-days", type=int, default=5,
                     help="資料落後超過這麼多天就警告")
     ap.add_argument("--as-of", default=None, metavar="YYYY-MM-DD",
-                    help="回放歷史某一天的訊息（驗證用，會連同 --dry-run 使用）")
+                    help="依據某一天的收盤回放（驗證用）")
+    ap.add_argument("--note", default="",
+                    help="在訊息開頭加一行提示，例如標明這是回放而非即時訊號")
     args = ap.parse_args()
 
     login()
     as_of = (date.fromisoformat(args.as_of) if args.as_of else None)
-    d = Daily(PRESETS[args.preset], args.max_leverage, as_of)
+    note = args.note or ("⚠️ **這是回放，不是即時訊號**" if as_of else "")
+    d = Daily(PRESETS[args.preset], args.max_leverage, as_of, note)
 
     lag = (date.today() - d.last.d).days
     if as_of is None and lag > args.stale_days:
