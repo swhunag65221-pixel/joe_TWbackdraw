@@ -248,5 +248,55 @@ class TestStopLine(unittest.TestCase):
         self.assertEqual(lv.zone(lv.stop_line - 1e-6), "warning")
 
 
+class TestTrendFilterAndFixedLeverage(unittest.TestCase):
+    """逆勢濾網與固定槓桿（docs/strategy.md §18）。"""
+
+    def _bars(self, closes):
+        from tw_backdraw.bars import Bar
+        return [Bar(d=date(2020, 1, 1) + timedelta(days=i), open=c, high=c,
+                    low=c, close=c) for i, c in enumerate(closes)]
+
+    def _entries(self, idxs):
+        return [FuturesEntry(entry_i=i, exit_i=i + 1, leverage=2.0,
+                             entry_index=100.0, stop_distance=0.05) for i in idxs]
+
+    def test_keeps_only_bars_below_the_moving_average(self):
+        from tw_backdraw.futures import trend_filter
+        closes = [100.0] * 5 + [90.0, 110.0]        # MA3 之後：第 5 根低、第 6 根高
+        bars = self._bars(closes)
+        kept = trend_filter(self._entries([5, 6]), bars, ma_period=3, below=True)
+        self.assertEqual([e.entry_i for e in kept], [5])
+
+    def test_above_mode_is_the_mirror_image(self):
+        from tw_backdraw.futures import trend_filter
+        bars = self._bars([100.0] * 5 + [90.0, 110.0])
+        kept = trend_filter(self._entries([5, 6]), bars, ma_period=3, below=False)
+        self.assertEqual([e.entry_i for e in kept], [6])
+
+    def test_drops_entries_where_the_average_is_undefined(self):
+        """均線暖身期一律排除 —— 不能用不存在的資料做判斷。"""
+        from tw_backdraw.futures import trend_filter
+        bars = self._bars([100.0] * 5)
+        self.assertEqual(trend_filter(self._entries([0, 1]), bars, ma_period=3), [])
+
+    def test_fixed_leverage_overrides_every_entry(self):
+        from tw_backdraw.futures import fixed_leverage
+        ents = [FuturesEntry(0, 1, 1.4, 100.0, 0.05),
+                FuturesEntry(2, 3, 4.6, 200.0, 0.02)]
+        out = fixed_leverage(ents, 3.0)
+        self.assertEqual([e.leverage for e in out], [3.0, 3.0])
+        # 其餘欄位不動
+        self.assertEqual([e.entry_i for e in out], [0, 2])
+        self.assertEqual([e.stop_distance for e in out], [0.05, 0.02])
+
+    def test_fixed_leverage_makes_equity_linear_in_the_futures_move(self):
+        from tw_backdraw.futures import fixed_leverage, vehicle_series
+        ds = days(3)
+        fut = [100.0, 100.0, 90.0]              # 期貨 −10%
+        ent = fixed_leverage([FuturesEntry(0, 2, 1.0, 100.0, 0.05)], 3.0)
+        nav, det = vehicle_series(ds, fut, ent, FREE, [100.0] * 3)
+        self.assertAlmostEqual(det[0].ret, -0.30, places=9)
+
+
 if __name__ == "__main__":
     unittest.main()

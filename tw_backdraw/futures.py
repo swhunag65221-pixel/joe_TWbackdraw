@@ -319,3 +319,30 @@ def format_trade_details(details: list[TradeDetail]) -> str:
         lines.append(f"    出場原因：{d.exit_reason}")
         lines.append("")
     return "\n".join(lines)
+
+
+def trend_filter(entries: list["FuturesEntry"], bars, ma_period: int = 200,
+                 below: bool = True) -> list["FuturesEntry"]:
+    """依進場日收盤與均線的位置過濾部位。
+
+    `below=True` 只保留**收盤低於均線**的訊號。這與直覺相反，但這是逆勢策略：
+    要求「站上均線才進場」會結構性排除最深的回檔，而深回檔正是報酬最好的場景
+    （見 docs/strategy.md §18）。均線資料不足的日子一律排除。
+    """
+    from .engine import moving_average
+    ma = moving_average(bars, ma_period)
+    out = []
+    for e in entries:
+        m = ma[e.entry_i]
+        if m is None:
+            continue
+        c = bars[e.entry_i].close
+        if (c < m) if below else (c > m):
+            out.append(e)
+    return out
+
+
+def fixed_leverage(entries: list["FuturesEntry"], leverage: float) -> list["FuturesEntry"]:
+    """把所有部位改成同一個槓桿倍數，不再依停損距離決定。"""
+    return [FuturesEntry(e.entry_i, e.exit_i, leverage, e.entry_index,
+                         e.stop_distance, e.trade) for e in entries]

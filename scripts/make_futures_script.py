@@ -213,11 +213,13 @@ def load_data():
 
 
 # ---------------------------------------------------------------- 回測
-def run(preset: str, max_leverage: float, same_day: bool = True):
+def run(preset: str, max_leverage: float, same_day: bool = True,
+        defensive: bool = False, fixed_lev: float = 0.0, ma_period: int = 200):
     from tw_backdraw.config import PRESETS
     from tw_backdraw.engine import Engine
     from tw_backdraw.futures import (
-        FuturesCost, entries_from_trades, trade_details, vehicle_series)
+        FuturesCost, entries_from_trades, fixed_leverage, trade_details,
+        trend_filter, vehicle_series)
 
     cfg = PRESETS[preset]
     bars, fseries, missing = load_data()
@@ -231,6 +233,14 @@ def run(preset: str, max_leverage: float, same_day: bool = True):
                        if same_day else "隔一個交易日收盤"))
     result = Engine(cfg).run(bars, fseries)
     entries = entries_from_trades(result.trades, bars, cfg, max_leverage, same_day)
+    if defensive:
+        before = len(entries)
+        entries = trend_filter(entries, bars, ma_period, below=True)
+        print(f"逆勢濾網：只做收盤低於 MA{ma_period} 的訊號　"
+              f"{before} → {len(entries)} 筆")
+    if fixed_lev:
+        entries = fixed_leverage(entries, fixed_lev)
+        print(f"固定槓桿：所有部位一律 {fixed_lev:g}x（不再依停損距離決定）")
 
     dates = [b.d for b in bars]
     nav, detail = vehicle_series(dates, fseries, entries,
@@ -304,6 +314,11 @@ def main() -> int:
     ap.add_argument("--max-leverage", type=float, default=5.0, help="槓桿上限，預設 5")
     ap.add_argument("--next-day-fill", action="store_true",
                     help="改用隔一個交易日收盤成交（預設為當天期貨收盤）")
+    ap.add_argument("--defensive", action="store_true",
+                    help="逆勢濾網：只做進場日收盤低於 MA200 的訊號")
+    ap.add_argument("--ma-period", type=int, default=200, help="濾網用的均線天期")
+    ap.add_argument("--fixed-leverage", type=float, default=0.0,
+                    help="所有部位改用同一個槓桿（建議搭配 --defensive，3 倍）")
     ap.add_argument("--trades-since", default=None, metavar="YYYY-MM-DD",
                     help="額外印出這天之後每一筆的完整明細（進場條件、"
                          "距離停損、槓桿、最大報酬／最大不利／期間最大回撤）")
@@ -318,7 +333,9 @@ def main() -> int:
 
     import pandas as pd
     bars, fseries, entries, nav, detail, details = run(
-        args.preset, args.max_leverage, same_day=not args.next_day_fill)
+        args.preset, args.max_leverage, same_day=not args.next_day_fill,
+        defensive=args.defensive, fixed_lev=args.fixed_leverage,
+        ma_period=args.ma_period)
 
     print(f"\\n{'進場':<12}{'出場':<12}{'停損距離':>9}{'槓桿':>7}"
           f"{'期貨報酬':>10}{'權益報酬':>10}")
@@ -337,20 +354,28 @@ def main() -> int:
         print(format_trade_details(picked))
 
     levs = [t.leverage for t in detail]
-    capped = sum(1 for x in levs if x >= args.max_leverage - 1e-9)
-    print(f"\\n槓桿：中位數 {sorted(levs)[len(levs) // 2]:.2f}　"
-          f"範圍 {min(levs):.2f}~{max(levs):.2f}　封頂 {capped}/{len(levs)} 筆")
+    if args.fixed_leverage:
+        print(f"\\n槓桿：固定 {args.fixed_leverage:g}x，共 {len(levs)} 筆")
+    else:
+        capped = sum(1 for x in levs if x >= args.max_leverage - 1e-9)
+        print(f"\\n槓桿：中位數 {sorted(levs)[len(levs) // 2]:.2f}　"
+              f"範圍 {min(levs):.2f}~{max(levs):.2f}　封頂 {capped}/{len(levs)} 筆")
 
     fill = "隔日" if args.next_day_fill else "當日"
+    lev = (f"固定 {args.fixed_leverage:g}x" if args.fixed_leverage
+           else f"槓桿≤{args.max_leverage:g}x")
+    tag = f"，逆勢 MA{args.ma_period}" if args.defensive else ""
     report = build_report(
         bars, nav, entries,
-        f"台指期快速修復 {args.preset}（槓桿≤{args.max_leverage:g}x，{fill}成交）")
+        f"台指期快速修復 {args.preset}（{lev}{tag}，{fill}成交）")
 
-    eq = report.creturn
     idx_series = pd.Series([b.close for b in bars],
                            index=pd.to_datetime([b.d for b in bars]))
     fut_series = pd.Series(fseries, index=idx_series.index)
-    rows = {f"策略（槓桿≤{args.max_leverage:g}x）": metrics(eq),
+    # 用自己算的 nav，不要用 report.creturn —— 後者從**第一筆交易**起算，
+    # 期初空手的策略 CAGR 會被灌水（防守版空手三年：19.2% vs 實際 17.0%）。
+    eq = pd.Series(nav, index=idx_series.index)
+    rows = {f"策略（{lev}{tag}）": metrics(eq),
             "買進持有 台指期（已還原換倉）": metrics(fut_series),
             "加權指數（價格指數）": metrics(idx_series)}
     table = pd.DataFrame(rows).T
