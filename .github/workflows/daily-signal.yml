@@ -5,7 +5,7 @@ name: 明日作戰表 → Discord
 # 13:00 UTC = 21:00 台北，此時 FinLab 的當日收盤資料通常已更新。
 on:
   schedule:
-    - cron: "0 13 * * 0-4"      # 週日至週四晚間 → 產出隔一個交易日的作戰表
+    - cron: "0 12 * * 0-4"      # 週日至週四晚間 → 產出隔一個交易日的作戰表
   workflow_dispatch:
     inputs:
       as_of:
