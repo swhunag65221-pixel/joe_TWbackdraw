@@ -5,3 +5,5 @@ venv/
 .DS_Store
 # 證交所逐月原始 JSON 快取，可用 scripts/fetch_twse.py 重建
 data/raw/
+# dist/tx_futures_backtest.py 執行時展開的策略程式碼（--workdir 預設位置）
+.tw_backdraw_pkg/
