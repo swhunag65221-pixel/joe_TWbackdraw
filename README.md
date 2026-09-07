@@ -282,6 +282,7 @@ scripts/
   train_test_best.py 切一個時點，訓練段選參數、測試段驗收
   fetch_taifex_rolls.py 期交所分月合約收盤價（算換倉價差用）
   make_futures_script.py 單檔可執行的台指期回測腳本產生器
+  hybrid_study.py  混合注碼：均線下固定 3x、均線上半預算風險式（docs/strategy.md §20）
   make_futures_notebook.py 台指期 Colab notebook 產生器（嵌入原始碼＋換倉價差）
 notebooks/         Colab 用的 .ipynb（tw50_2x_finlab／tx_futures_finlab）
 dist/              單檔可執行的腳本（tx_futures_backtest.py）
