@@ -1,6 +1,7 @@
 # 單檔可執行的回測腳本
 
 `tx_futures_backtest.py` —— 台指期版，不需 clone repo。
+Colab 上執行請改用 [`notebooks/tx_futures_finlab.ipynb`](../notebooks/tx_futures_finlab.ipynb)（同一份程式碼與資料，結果一致）。
 
 ```bash
 pip install finlab pandas
