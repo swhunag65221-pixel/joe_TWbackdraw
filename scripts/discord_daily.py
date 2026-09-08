@@ -38,7 +38,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -708,6 +708,26 @@ class Daily:
         }]}
 
 
+#: --require-today 時，資料尚未更新到今天的結束碼（workflow 據此重試）
+EXIT_STALE = 3
+
+
+def taipei_today() -> date:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Taipei")).date()
+    except Exception:                      # 沒有 tzdata 時退回 UTC+8
+        from datetime import timedelta, timezone
+        return datetime.now(timezone(timedelta(hours=8))).date()
+
+
+def data_is_stale(last: date) -> bool:
+    """今天（台北）是平日、且資料最後一根早於今天 → FinLab 尚未更新今日收盤。
+    休市日也會被判為 stale（無法從資料本身分辨），訊息裡會註明。"""
+    today = taipei_today()
+    return today.weekday() < 5 and last < today
+
+
 def post(url: str, payload: dict) -> None:
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"),
@@ -741,6 +761,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="沒有動作也沒有接近觸發時，不送訊息")
     ap.add_argument("--stale-days", type=int, default=5,
                     help="資料落後超過這麼多天就警告")
+    ap.add_argument("--require-today", action="store_true",
+                    help=f"資料尚未更新到今天（台北平日）就不送出、以結束碼 {EXIT_STALE} 結束，"
+                         "供 workflow 重試；不加此旗標則照送並在訊息開頭標注")
     ap.add_argument("--as-of", default=None, metavar="YYYY-MM-DD",
                     help="依據某一天的收盤回放（驗證用）")
     ap.add_argument("--full", action="store_true",
@@ -755,10 +778,19 @@ def main(argv: list[str] | None = None) -> int:
     d = Daily(PRESETS[args.preset], args.max_leverage, as_of, note,
               sizing=args.sizing, step_down=not args.no_step_down)
 
-    lag = (date.today() - d.last.d).days
+    lag = (taipei_today() - d.last.d).days
     if as_of is None and lag > args.stale_days:
         print(f"⚠️ 資料只到 {d.last.d}（落後 {lag} 天），FinLab 可能尚未更新",
               file=sys.stderr)
+    if as_of is None and data_is_stale(d.last.d):
+        msg = (f"資料最後日期 {d.last.d}，今天（{taipei_today()}）的收盤尚未更新"
+               "（FinLab 未更新，或今日休市）")
+        if args.require_today:
+            print(f"⏳ {msg} → 不送出，結束碼 {EXIT_STALE}", file=sys.stderr)
+            return EXIT_STALE
+        print(f"⚠️ {msg}，照送並標注", file=sys.stderr)
+        d.note = (f"⚠️ **{msg}** —— 以下依 {d.last.d} 收盤計算"
+                  + (f"\n{d.note}" if d.note else ""))
 
     if args.only_if_action and not d.has_action():
         print(f"{d.last.d} 沒有動作也沒有接近觸發，不送出。")
