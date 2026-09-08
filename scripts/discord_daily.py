@@ -13,8 +13,10 @@
     進場日收盤 ≥ MA200 → 半預算風險式：4% ÷ 停損距離，上限 2.5x
                           （每口需要 = (收盤 − 停損線) × 1,250）
     3x 部位權益達 +150%（期貨自進場價 +50%）→ 減碼到 1x，之後不加回（step-down）
-    空手且收盤 > MA200 → 核心 0.5x
+    空手 → 核心 0.5x，濾網為 MA200 加 ±2% 遲滯緩衝帶：
+                          站上 MA200×1.02 才開、跌破 MA200×0.98 才關，帶內不動作
 `--sizing risk --no-step-down` 可切回舊版（8% ÷ 停損距離、上限 5x、不減碼）。
+`--core-band 0` 可把核心切回逐日 `收盤 > MA200`（docs/coverage.md §5）。
 
 為什麼改成晚上跑
 ----------------
@@ -50,14 +52,17 @@ from tw_backdraw.config import PRESETS, StrategyConfig              # noqa: E402
 from tw_backdraw.engine import Engine, moving_average               # noqa: E402
 from tw_backdraw.futures import (FuturesCost, entries_from_trades,  # noqa: E402
                                  entry_regime, futures_leverage,
-                                 hybrid_entries, trade_details,
-                                 vehicle_series)
+                                 hybrid_entries, ma_band_filter,
+                                 trade_details, vehicle_series)
 from tw_backdraw.levels import build_levels                         # noqa: E402
 from tw_backdraw.setup import detect_setups, scan_episodes          # noqa: E402
 
 #: 依 docs/coverage.md 的驗收結論：空手時持有 0.5x 核心，濾網為指數 > MA200
 CORE_LEVERAGE = 0.5
 CORE_MA = 200
+#: 核心濾網的遲滯緩衝帶（docs/coverage.md §5）。站上 MA200×1.02 才開、
+#: 跌破 MA200×0.98 才關，帶內不動作。用 `--core-band 0` 可切回逐日判定。
+CORE_BAND = 0.02
 #: §20 混合注碼：均線下固定 3x；均線上風險預算砍半（4%）
 BELOW_LEV = 3.0
 ABOVE_RISK_SCALE = 0.5
@@ -76,12 +81,14 @@ def pct(x: float) -> str:
 class Daily:
     def __init__(self, cfg: StrategyConfig, max_leverage: float,
                  as_of: date | None = None, note: str = "",
-                 sizing: str = "hybrid", step_down: bool = True):
+                 sizing: str = "hybrid", step_down: bool = True,
+                 core_band: float = CORE_BAND):
         self.cfg = cfg
         self.max_leverage = max_leverage
         self.note = note
         self.sizing = sizing
         self.step_down = step_down
+        self.core_band = core_band
         self.bars, self.fs, self.missing = load_tx()
         if as_of is not None:            # 回放歷史某一天，用來驗證訊息內容
             keep = [i for i, b in enumerate(self.bars) if b.d <= as_of]
@@ -93,6 +100,9 @@ class Daily:
         self.ic = [b.close for b in self.bars]
         self.ma_series = moving_average(self.bars, CORE_MA)
         self.ma = self.ma_series[-1]
+        # 核心的開關是**有狀態的**（緩衝帶帶內維持原狀），不能只看今天的收盤
+        self.core_series = ma_band_filter(self.ic, self.ma_series,
+                                          core_band, core_band)
 
         # 「均線上」規則的風險預算與槓桿上限；均線下固定 BELOW_LEV
         if sizing == "hybrid":
@@ -168,7 +178,8 @@ class Daily:
 
     @property
     def core_on(self) -> bool:
-        return self.ma is not None and self.last.close > self.ma
+        """核心濾網今天是開還是關。緩衝帶為 0 時等同 `收盤 > MA200`。"""
+        return self.core_series[-1]
 
     # ---- 注碼：均線位置、槓桿、每口需要 ----
     def regime_today(self) -> str:
@@ -503,29 +514,41 @@ class Daily:
         if self.ma is None:
             return "資料不足，無法計算均線。"
         above = c / self.ma - 1
-        verb = "站上" if self.core_on else "跌破"
-        line = (f"MA{CORE_MA} = {self.ma:,.0f}，指數{verb}均線 {above:+.1%}")
-        cross = self.ma_cross_tomorrow()
+        on, band = self.core_on, self.core_band
+        line = (f"MA{CORE_MA} = {self.ma:,.0f}，"
+                f"指數{'站上' if above > 0 else '跌破'}均線 {above:+.1%}")
+        if band:
+            line += (f"\n緩衝帶 ±{band:.0%}："
+                     f"開啟 {self.ma * (1 + band):,.0f}／"
+                     f"關閉 {self.ma * (1 - band):,.0f}　→　帶內維持原狀，不動作")
+        # 開著就盯關閉門檻，關著就盯開啟門檻 —— 另一條這時碰不到
+        cross = self.ma_cross_tomorrow((1 - band) if on else (1 + band))
         if cross is not None:
-            side = "跌破" if self.core_on else "站上"
-            line += (f"\n明日交叉價 **{cross:,.0f}**（{pct(cross / c - 1)}）"
-                     f"　→　收在這之{'下' if self.core_on else '上'}就{side}")
+            if not band:
+                label, side = "交叉價", "跌破" if on else "站上"
+            else:
+                label, side = ("關閉門檻", "關閉核心") if on else ("開啟門檻", "開啟核心")
+            line += (f"\n明日{label} **{cross:,.0f}**（{pct(cross / c - 1)}）"
+                     f"　→　收在這之{'下' if on else '上'}就{side}")
         if self.open_trade is not None:
             return line + ("\n→ 目前有策略部位，**核心部位不啟用**"
                            "（核心只在策略空手時填補曝險）")
         state = "**持有中**" if self.core_on else "**空手**"
         return line + f"\n→ 策略空手，核心 {CORE_LEVERAGE:g}x {state}"
 
-    def ma_cross_tomorrow(self) -> float | None:
-        """明天恰好站上／跌破均線的收盤價。
+    def ma_cross_tomorrow(self, k: float = 1.0) -> float | None:
+        """明天恰好讓「收盤 = 均線 × k」成立的收盤價。
 
-        明日均線 = (前 N-1 根收盤和 + 明日收盤) / N，
-        所以「明日收盤 > 明日均線」等價於「明日收盤 > 前 N-1 根收盤和 / (N-1)」——
-        今晚就能算出確切的交叉價，不必等明天。
+        明日均線 = (前 N-1 根收盤和 S + 明日收盤 c) / N，令 c = k × 均線：
+
+            c = k(S + c)/N　→　c(N − k) = kS　→　c = kS / (N − k)
+
+        今晚就能算出確切的門檻，不必等明天。`k = 1` 是均線交叉價本身
+        （注碼用）；`k = 1 ± 緩衝帶` 是核心濾網的開啟／關閉門檻。
         """
         if len(self.ic) < CORE_MA:
             return None
-        return sum(self.ic[-(CORE_MA - 1):]) / (CORE_MA - 1)
+        return k * sum(self.ic[-(CORE_MA - 1):]) / (CORE_MA - k)
 
     def has_action(self) -> bool:
         """明天是否有實際可能被觸發的點位（用於 --only-if-action）。"""
@@ -654,11 +677,12 @@ class Daily:
                 f"🔻 跌破 **{start:,.0f}**（{start / c - 1:+.1%}）→ 開始追蹤新的一段"]), GREY)
 
     def rule_tag(self) -> str:
+        step = f"　減碼 +{STEP_GAIN:.0%}→{STEP_LEV:g}x" if self.step_down else ""
+        band = f"　核心緩衝帶 ±{self.core_band:.0%}" if self.core_band else ""
         if self.sizing == "hybrid":
-            return (f"注碼 均線下 {BELOW_LEV:g}x／均線上 {self.risk:.0%}÷停損距離≤{self.cap:g}x"
-                    + (f"　減碼 +{STEP_GAIN:.0%}→{STEP_LEV:g}x" if self.step_down else ""))
-        return (f"參數組 tuned　槓桿上限 {self.max_leverage:g}x"
-                + (f"　減碼 +{STEP_GAIN:.0%}→{STEP_LEV:g}x" if self.step_down else ""))
+            return (f"注碼 均線下 {BELOW_LEV:g}x／均線上 "
+                    f"{self.risk:.0%}÷停損距離≤{self.cap:g}x" + step + band)
+        return (f"參數組 tuned　槓桿上限 {self.max_leverage:g}x" + step + band)
 
     def payload(self, full: bool = False) -> dict:
         note = f"{self.note}\n" if self.note else ""
@@ -721,6 +745,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="hybrid＝§20 混合注碼（預設）；risk＝舊版 8%% ÷ 停損距離")
     ap.add_argument("--no-step-down", action="store_true",
                     help="關閉 §22 的 step-down（權益 +150%% → 降到 1x）")
+    ap.add_argument("--core-band", type=float, default=CORE_BAND, metavar="X",
+                    help="核心濾網的遲滯緩衝帶：站上 MA200×(1+X) 才開、"
+                         "跌破 MA200×(1−X) 才關。預設 %(default)g，"
+                         "傳 0 可切回逐日 `收盤 > MA200`")
     ap.add_argument("--dry-run", action="store_true", help="只印出，不送出")
     ap.add_argument("--only-if-action", action="store_true",
                     help="沒有動作也沒有接近觸發時，不送訊息")
@@ -737,8 +765,11 @@ def main(argv: list[str] | None = None) -> int:
     login()
     as_of = (date.fromisoformat(args.as_of) if args.as_of else None)
     note = args.note or ("⚠️ **這是回放，不是即時訊號**" if as_of else "")
+    if not 0.0 <= args.core_band < 1.0:
+        raise SystemExit("--core-band 必須在 [0, 1) 之間")
     d = Daily(PRESETS[args.preset], args.max_leverage, as_of, note,
-              sizing=args.sizing, step_down=not args.no_step_down)
+              sizing=args.sizing, step_down=not args.no_step_down,
+              core_band=args.core_band)
 
     lag = (date.today() - d.last.d).days
     if as_of is None and lag > args.stale_days:

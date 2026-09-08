@@ -23,6 +23,12 @@ python3 tx_daily_signal.py notify --webhook URL --title 標題 --text 內文   #
 `--note`、`--sizing risk --no-step-down` 切回舊版注碼）。注碼規則與決策樹見
 [docs/final_package.md](../docs/final_package.md)。
 
+核心 0.5x 的均線濾網帶 **±2% 遲滯緩衝帶**（`--core-band`，預設 0.02）：
+站上 MA200×1.02 才開、跌破 MA200×0.98 才關，帶內維持原狀。
+這是為了消掉均線附近的來回空轉（2018 至今核心切換 48 → 8 次），
+依據與限制見 [docs/coverage.md §5](../docs/coverage.md)。
+`--core-band 0` 可切回舊的逐日 `收盤 > MA200`。
+
 策略程式碼、每日訊息程式、332 筆換倉價差全部逐字嵌入，新的換倉日會自動向期交所補抓；
 已驗證在乾淨目錄執行的輸出與 repo 版逐字相同。由 `scripts/make_daily_script.py` 產生，
 改了程式請重新產生。

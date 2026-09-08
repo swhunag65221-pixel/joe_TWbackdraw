@@ -25,7 +25,8 @@ from tx_data import login                                          # noqa: E402
 from tw_backdraw.engine import moving_average                      # noqa: E402
 from tw_backdraw.futures import (FuturesCost, FuturesEntry,        # noqa: E402
                                  FuturesTrade, core_overlay,
-                                 fixed_leverage, vehicle_series)
+                                 fixed_leverage, ma_band_filter,
+                                 vehicle_series)
 
 COST = FuturesCost()
 PERIODS = (("全期 1999-2026", date(1999, 1, 1), date(2027, 1, 1)),
@@ -209,6 +210,15 @@ def on_ma50(bk):
                  and m50[i] > bk.ma[i]) for i in range(len(bk.dates))]
 
 
+def on_band(bk, width=0.02):
+    """遲滯緩衝帶：站上 MA×(1+w) 才開，跌破 MA×(1−w) 才關。
+
+    正式實作在 `tw_backdraw.futures.ma_band_filter`，這裡只是接上研究框架，
+    避免研究與上線用兩份會走樣的程式。
+    """
+    return ma_band_filter(bk.ic, bk.ma, width, width)
+
+
 def rescale_lev(bk, lev, on, mean=0.5):
     """把逐日槓桿等比例縮放，使「核心持有日的平均槓桿」等於 mean。
 
@@ -286,6 +296,9 @@ def build(bk):
         v[f"＋核心 {x:g}x 斜率濾網"] = (H, on_slope(bk), const_lev(bk, x), None)
     for x in (0.25, 0.5, 0.75):
         v[f"＋核心 {x:g}x MA50>MA200"] = (H, on_ma50(bk), const_lev(bk, x), None)
+    for w in (0.01, 0.02, 0.03):
+        v[f"＋核心 0.5x 緩衝帶±{w:.0%}"] = (H, on_band(bk, w),
+                                            const_lev(bk, 0.5), None)
     for s in (0.08, 0.12):
         for x in (0.5, 0.75):
             v[f"＋核心 {x:g}x 停損{s:.0%}"] = (H, on_ma(bk), const_lev(bk, x), s)
