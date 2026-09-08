@@ -204,8 +204,9 @@ if __name__ == "__main__":
 
 YML = '''name: 明日作戰表 → Discord
 
-# 前一晚執行（12:00 UTC = 20:00 台北）。若 log 顯示「資料只到前一個交易日」，
-# 代表 FinLab 尚未更新當日收盤，把 cron 往後調（例如 "0 13 * * 0-4" = 21:00 台北）。
+# 前一晚執行（12:00 UTC = 20:00 台北起）。FinLab 的當日收盤通常晚間才更新：
+# 腳本以 --require-today 檢查資料是否已到今天，沒有就每 10 分鐘重試、最多 90 分鐘；
+# 逾時仍未更新則照送，訊息開頭會標注「資料最後日期 X」。
 # 所有觸發點位由當天已收盤的資料決定，明天不會變動，排程延遲幾分鐘也無所謂。
 #
 # 設定：Settings → Secrets and variables → Actions 新增
@@ -236,7 +237,7 @@ concurrency:
 jobs:
   plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 120   # 含最多 90 分鐘等待 FinLab 更新
     steps:
       - uses: actions/checkout@v4
 
@@ -265,10 +266,19 @@ jobs:
           Finlab_API_token: ${{ secrets.FINLAB_API_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python3 tx_daily_signal.py \\
-            ${{ inputs.as_of && format('--as-of {0}', inputs.as_of) || '' }} \\
-            ${{ inputs.full && '--full' || '' }} \\
-            ${{ inputs.dry_run && '--dry-run' || '' }}
+          ARGS="${{ inputs.as_of && format('--as-of {0}', inputs.as_of) || '' }} \\
+                ${{ inputs.full && '--full' || '' }} \\
+                ${{ inputs.dry_run && '--dry-run' || '' }}"
+          # FinLab 的當日收盤通常在晚間才更新：資料還沒到今天就每 10 分鐘重試，最多 90 分鐘
+          for i in 1 2 3 4 5 6 7 8 9; do
+            python3 tx_daily_signal.py --require-today $ARGS && exit 0
+            rc=$?
+            [ "$rc" -ne 3 ] && exit "$rc"
+            echo "第 $i 次：資料尚未更新到今天，10 分鐘後重試"
+            sleep 600
+          done
+          echo "等待逾時，改以最新可得資料送出（訊息開頭會標注）"
+          python3 tx_daily_signal.py $ARGS
 
       - name: 失敗時通知 Discord
         if: failure()

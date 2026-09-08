@@ -7,7 +7,8 @@
 1. 新建一個 repo，把 `tx_daily_signal.py` 放在根目錄、`daily-signal.yml` 放到 `.github/workflows/`。
 2. Settings → Secrets and variables → Actions 新增 `FINLAB_API_TOKEN` 與 `DISCORD_WEBHOOK_URL`。
 3. Actions 頁面手動 Run workflow（勾 dry_run 先看 log），之後每週日～四 20:00 台北時間（12:00 UTC）自動執行。
-   若 log 出現「資料只到前一個交易日」，代表 FinLab 尚未更新，把 yml 的 cron 往後調一小時。
+   FinLab 的當日收盤通常晚間才更新：workflow 會以 `--require-today` 檢查，資料還沒到今天就
+   每 10 分鐘重試、最多 90 分鐘；逾時仍未更新則照送，訊息開頭會標注「資料最後日期 X」。
 
 本機測試：
 
