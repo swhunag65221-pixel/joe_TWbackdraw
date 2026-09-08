@@ -1,6 +1,7 @@
 name: 明日作戰表 → Discord
 
-# 前一晚執行（13:00 UTC = 21:00 台北，FinLab 當日收盤資料通常已更新）。
+# 前一晚執行（12:00 UTC = 20:00 台北）。若 log 顯示「資料只到前一個交易日」，
+# 代表 FinLab 尚未更新當日收盤，把 cron 往後調（例如 "0 13 * * 0-4" = 21:00 台北）。
 # 所有觸發點位由當天已收盤的資料決定，明天不會變動，排程延遲幾分鐘也無所謂。
 #
 # 設定：Settings → Secrets and variables → Actions 新增
@@ -9,7 +10,7 @@ name: 明日作戰表 → Discord
 # 把 tx_daily_signal.py 放在 repo 根目錄，本檔放到 .github/workflows/。
 on:
   schedule:
-    - cron: "0 13 * * 0-4"      # 週日至週四晚間 → 產出隔一個交易日的作戰表
+    - cron: "0 12 * * 0-4"      # 週日至週四晚間 → 產出隔一個交易日的作戰表
   workflow_dispatch:
     inputs:
       as_of:
