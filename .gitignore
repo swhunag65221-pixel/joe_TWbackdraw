@@ -7,3 +7,6 @@ venv/
 data/raw/
 # dist/tx_futures_backtest.py 執行時展開的策略程式碼（--workdir 預設位置）
 .tw_backdraw_pkg/
+# lab_mdd 研究腳本的 load_tx() 快取
+scripts/lab_mdd/tx.pkl
+scripts/lab_mdd/*.pkl

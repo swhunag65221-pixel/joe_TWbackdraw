@@ -283,6 +283,8 @@ scripts/
   fetch_taifex_rolls.py 期交所分月合約收盤價（算換倉價差用）
   make_futures_script.py 單檔可執行的台指期回測腳本產生器
   hybrid_study.py  混合注碼：均線下固定 3x、均線上半預算風險式（docs/strategy.md §20）
+  walk_forward_sizing.py 注碼規則層的逐筆錨定 walk-forward（§21）
+  lab_mdd/         多代理 MDD 研究：回吐／核心／分散／最終套件（§22，報告在 docs/lab_mdd/）
   make_futures_notebook.py 台指期 Colab notebook 產生器（嵌入原始碼＋換倉價差）
 notebooks/         Colab 用的 .ipynb（tw50_2x_finlab／tx_futures_finlab）
 dist/              單檔可執行的腳本（tx_futures_backtest.py）
