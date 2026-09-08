@@ -22,8 +22,8 @@ from scripts.tx_data import load_tx, login                     # noqa: E402
 from tw_backdraw.config import PRESETS                          # noqa: E402
 from tw_backdraw.engine import Engine                           # noqa: E402
 from tw_backdraw.futures import (FuturesCost, entries_from_trades,  # noqa: E402
-                                 format_trade_details, trade_details,
-                                 vehicle_series)
+                                 format_trade_details, hybrid_entries,
+                                 trade_details, vehicle_series)
 
 
 def summary(details) -> str:
@@ -48,6 +48,10 @@ def main() -> int:
     ap.add_argument("--since", default=None, help="只列出這天之後進場的交易 YYYY-MM-DD")
     ap.add_argument("--next-day-fill", action="store_true",
                     help="改用隔一個交易日收盤成交（預設為當天期貨收盤）")
+    ap.add_argument("--sizing", default="hybrid", choices=("hybrid", "risk"),
+                    help="hybrid＝最終套件（均線下 3x／均線上半預算，預設）；risk＝舊版 8%% ÷ 停損距離")
+    ap.add_argument("--no-step-down", action="store_true",
+                    help="關閉 step-down（權益 +150%% → 降到 1x）")
     args = ap.parse_args()
 
     login()
@@ -55,15 +59,21 @@ def main() -> int:
     bars, fseries, missing = load_tx()
     print(f"期間 {bars[0].d} ~ {bars[-1].d}（{len(bars)} 個交易日）"
           f"　成交時點：{'隔一個交易日收盤' if args.next_day_fill else '當天期貨收盤'}")
+    print("注碼：" + ("均線下固定 3x／均線上 4% ÷ 停損距離（≤2.5x）" if args.sizing == "hybrid"
+                    else f"舊版 8% ÷ 停損距離（≤{args.max_leverage:g}x）")
+          + ("　減碼 +150%→1x" if not args.no_step_down else "　不減碼"))
     if missing:
         print(f"⚠ {len(missing)} 個換倉日缺次月報價：{missing[:5]}")
 
     result = Engine(cfg).run(bars, fseries)
     entries = entries_from_trades(result.trades, bars, cfg, args.max_leverage,
                                   same_day=not args.next_day_fill)
+    if args.sizing == "hybrid":
+        entries = hybrid_entries(entries, bars, 200, 3.0, 0.5)
     dates = [b.d for b in bars]
     nav, detail = vehicle_series(dates, fseries, entries, FuturesCost(),
-                                 [b.close for b in bars])
+                                 [b.close for b in bars],
+                                 step_gain=None if args.no_step_down else 1.5)
     details = trade_details(dates, nav, entries, detail)
 
     if args.since:
