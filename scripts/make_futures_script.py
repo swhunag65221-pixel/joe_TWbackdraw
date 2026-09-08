@@ -88,8 +88,10 @@ BODY = '''#!/usr/bin/env python3
    價差不計入損益。台指期長期逆價差，不還原的話 332 次換倉會憑空造成
    每年約 −3.8% 的假虧損（實測未還原 7.28x vs 已還原 20.44x）。
 
-2. **槓桿由停損距離決定**：L = 風險預算 ÷ 停損距離，上限由 --max-leverage 指定。
-   刻意不套 ETF 版的 5% 停損下限 —— 那個下限會讓 L 恆等於 1.6 倍，上限永遠碰不到。
+2. **注碼（預設為 docs/final_package.md 的最終套件）**：進場日收盤 < MA200 → 固定 3x；
+   ≥ MA200 → 4% ÷ 停損距離、上限 2.5x；權益 +150% → 減碼到 1x；空手時核心 0.5x
+   （遲滯帶 ±2%）。`--sizing risk --no-step-down --core 0` 切回舊版
+   （8% ÷ 停損距離、上限由 --max-leverage 指定）。停損距離刻意不套 ETF 版的 5% 下限。
 
 3. **進場後不調整口數**：持有期間權益為 1 + L×(F/F0 − 1)，線性、不複利、不再平衡。
 
@@ -214,12 +216,14 @@ def load_data():
 
 # ---------------------------------------------------------------- 回測
 def run(preset: str, max_leverage: float, same_day: bool = True,
-        defensive: bool = False, fixed_lev: float = 0.0, ma_period: int = 200):
+        defensive: bool = False, fixed_lev: float = 0.0, ma_period: int = 200,
+        sizing: str = "hybrid", step_down: bool = True, core: float = 0.5,
+        core_band: float = 0.02):
     from tw_backdraw.config import PRESETS
-    from tw_backdraw.engine import Engine
+    from tw_backdraw.engine import Engine, moving_average
     from tw_backdraw.futures import (
-        FuturesCost, entries_from_trades, fixed_leverage, trade_details,
-        trend_filter, vehicle_series)
+        FuturesCost, core_overlay, entries_from_trades, fixed_leverage,
+        hybrid_entries, trade_details, trend_filter, vehicle_series)
 
     cfg = PRESETS[preset]
     bars, fseries, missing = load_data()
@@ -233,6 +237,12 @@ def run(preset: str, max_leverage: float, same_day: bool = True,
                        if same_day else "隔一個交易日收盤"))
     result = Engine(cfg).run(bars, fseries)
     entries = entries_from_trades(result.trades, bars, cfg, max_leverage, same_day)
+    if sizing == "hybrid" and not fixed_lev:
+        entries = hybrid_entries(entries, bars, ma_period, 3.0, 0.5)
+        print(f"注碼：進場日收盤 < MA{ma_period} 固定 3x；≥ MA{ma_period} "
+              f"{cfg.sizing.risk_per_trade / 2:.0%} ÷ 停損距離（≤{max_leverage / 2:g}x）")
+    else:
+        print(f"注碼：舊版 {cfg.sizing.risk_per_trade:.0%} ÷ 停損距離（≤{max_leverage:g}x）")
     if defensive:
         before = len(entries)
         entries = trend_filter(entries, bars, ma_period, below=True)
@@ -241,12 +251,25 @@ def run(preset: str, max_leverage: float, same_day: bool = True,
     if fixed_lev:
         entries = fixed_leverage(entries, fixed_lev)
         print(f"固定槓桿：所有部位一律 {fixed_lev:g}x（不再依停損距離決定）")
+    step = 1.5 if step_down else None
+    print("減碼：" + ("權益 +150% → 降到 1x" if step_down else "關閉"))
 
     dates = [b.d for b in bars]
-    nav, detail = vehicle_series(dates, fseries, entries,
-                                 FuturesCost(), [b.close for b in bars])
+    closes = [b.close for b in bars]
+    # 策略部位本身（逐筆明細用）
+    nav_pos, detail = vehicle_series(dates, fseries, entries, FuturesCost(), closes,
+                                     step_gain=step, step_leverage=1.0)
+    # 疊上空手期核心 → 完整套件的淨值（報表與績效用）
+    if core:
+        nav, _, _ = core_overlay(dates, fseries, entries, FuturesCost(), closes, core,
+                                 moving_average(bars, ma_period), step_gain=step,
+                                 step_leverage=1.0, band=core_band)
+        print(f"核心：空手時 {core:g}x，站上 MA{ma_period}×{1 + core_band:.2f} 建、"
+              f"跌破 ×{1 - core_band:.2f} 平")
+    else:
+        nav = nav_pos
     return (bars, fseries, entries, nav, detail,
-            trade_details(dates, nav, entries, detail))
+            trade_details(dates, nav_pos, entries, detail), nav_pos)
 
 
 def build_report(bars, nav, entries, name: str):
@@ -319,6 +342,14 @@ def main() -> int:
     ap.add_argument("--ma-period", type=int, default=200, help="濾網用的均線天期")
     ap.add_argument("--fixed-leverage", type=float, default=0.0,
                     help="所有部位改用同一個槓桿（建議搭配 --defensive，3 倍）")
+    ap.add_argument("--sizing", default="hybrid", choices=("hybrid", "risk"),
+                    help="hybrid＝最終套件（均線下 3x／均線上半預算，預設）；risk＝舊版 8%% ÷ 停損距離")
+    ap.add_argument("--no-step-down", action="store_true",
+                    help="關閉 step-down（權益 +150%% → 降到 1x）")
+    ap.add_argument("--core", type=float, default=0.5,
+                    help="空手期核心槓桿，0 = 不加（預設 0.5）")
+    ap.add_argument("--core-band", type=float, default=0.02,
+                    help="核心遲滯帶（預設 0.02 = ±2%%）")
     ap.add_argument("--trades-since", default=None, metavar="YYYY-MM-DD",
                     help="額外印出這天之後每一筆的完整明細（進場條件、"
                          "距離停損、槓桿、最大報酬／最大不利／期間最大回撤）")
@@ -332,17 +363,18 @@ def main() -> int:
     login()
 
     import pandas as pd
-    bars, fseries, entries, nav, detail, details = run(
+    bars, fseries, entries, nav, detail, details, nav_pos = run(
         args.preset, args.max_leverage, same_day=not args.next_day_fill,
         defensive=args.defensive, fixed_lev=args.fixed_leverage,
-        ma_period=args.ma_period)
+        ma_period=args.ma_period, sizing=args.sizing,
+        step_down=not args.no_step_down, core=args.core, core_band=args.core_band)
 
-    print(f"\\n{'進場':<12}{'出場':<12}{'停損距離':>9}{'槓桿':>7}"
+    print(f"\\n{'進場':<12}{'出場':<12}{'停損距離':>9}{'槓桿':>7}{'減碼日':>12}"
           f"{'期貨報酬':>10}{'權益報酬':>10}")
-    print("-" * 62)
+    print("-" * 74)
     for t in detail:
         print(f"{t.entry_date!s:<12}{str(t.exit_date or '持有中'):<12}"
-              f"{t.stop_distance:>9.2%}{t.leverage:>7.2f}"
+              f"{t.stop_distance:>9.2%}{t.leverage:>7.2f}{str(t.step_date or ''):>12}"
               f"{t.futures_return:>10.1%}{t.ret:>10.1%}")
 
     if args.trades_since:
@@ -363,8 +395,9 @@ def main() -> int:
 
     fill = "隔日" if args.next_day_fill else "當日"
     lev = (f"固定 {args.fixed_leverage:g}x" if args.fixed_leverage
-           else f"槓桿≤{args.max_leverage:g}x")
-    tag = f"，逆勢 MA{args.ma_period}" if args.defensive else ""
+           else ("混合注碼" if args.sizing == "hybrid" else f"槓桿≤{args.max_leverage:g}x"))
+    tag = (f"，逆勢 MA{args.ma_period}" if args.defensive else "") + \\
+          (f"，核心 {args.core:g}x" if args.core else "")
     report = build_report(
         bars, nav, entries,
         f"台指期快速修復 {args.preset}（{lev}{tag}，{fill}成交）")
@@ -375,7 +408,8 @@ def main() -> int:
     # 用自己算的 nav，不要用 report.creturn —— 後者從**第一筆交易**起算，
     # 期初空手的策略 CAGR 會被灌水（防守版空手三年：19.2% vs 實際 17.0%）。
     eq = pd.Series(nav, index=idx_series.index)
-    rows = {f"策略（{lev}{tag}）": metrics(eq),
+    rows = {f"完整套件（{lev}{tag}）": metrics(eq),
+            "策略部位本身（不含核心）": metrics(pd.Series(nav_pos, index=idx_series.index)),
             "買進持有 台指期（已還原換倉）": metrics(fut_series),
             "加權指數（價格指數）": metrics(idx_series)}
     table = pd.DataFrame(rows).T

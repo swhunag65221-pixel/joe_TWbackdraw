@@ -344,9 +344,11 @@ def format_trade_details(details: list[TradeDetail]) -> str:
             + (f"（警戒線 {lv.warn_line:,.0f} 再扣假跌破緩衝）"
                if lv.stop_line < lv.warn_line else "（警戒線）")
             + f"　失效線 {lv.invalidation:,.0f}")
+        step = (f"，{t.step_date} 減碼至 {t.final_leverage:g}x"
+                if t.step_date is not None else "")
         lines.append(
-            f"    距離停損 {t.stop_distance:.2%}　→　槓桿 "
-            f"{t.leverage:.2f}x（風險預算 ÷ 停損距離，上限封頂）")
+            f"    距離停損 {t.stop_distance:.2%}　→　槓桿 {t.leverage:.2f}x"
+            f"（依注碼規則{step}）")
         lines.append(
             f"    期貨報酬 {t.futures_return:+.1%}　權益報酬 {t.ret:+.1%}"
             f"　最大報酬 {d.mfe:+.1%}　最大不利 {d.mae:+.1%}"
