@@ -428,3 +428,105 @@ class TestHybridEntriesAndStepDown(unittest.TestCase):
         nav_v, det_v = vehicle_series(ds, fut, ent, FREE, [100.0] * 5, step_gain=1.5)
         self.assertEqual(nav_c, nav_v)
         self.assertEqual(det_c[0].step_date, det_v[0].step_date)
+
+
+class TestMaBandFilter(unittest.TestCase):
+    """核心濾網的遲滯緩衝帶（docs/coverage.md「核心濾網的緩衝帶」）。"""
+
+    def test_zero_band_is_exactly_the_old_close_above_ma_rule(self):
+        """帶寬 0 必須逐點等於舊版 `收盤 > 均線`，包含相等的邊界。"""
+        from tw_backdraw.futures import ma_band_filter
+        ma = [100.0, 100.0, 100.0, 100.0, 100.0, None]
+        ic = [101.0, 100.0, 99.0, 100.0, 101.0, 100.0]
+        old = [m is not None and c > m for c, m in zip(ic, ma)]
+        self.assertEqual(ma_band_filter(ic, ma, 0.0, 0.0), old)
+
+    def test_equal_to_the_average_counts_as_off(self):
+        """收盤恰好等於均線時判為關 —— 與 `c > m` 一致，不是四捨五入的巧合。"""
+        from tw_backdraw.futures import ma_band_filter
+        self.assertEqual(ma_band_filter([101.0, 100.0], [100.0, 100.0]),
+                         [True, False])
+
+    def test_band_needs_a_real_breakout_to_switch_on(self):
+        from tw_backdraw.futures import ma_band_filter
+        ic = [101.0, 102.0, 103.0]                   # 均線 100，門檻 102
+        self.assertEqual(ma_band_filter(ic, [100.0] * 3, 0.02, 0.02),
+                         [False, False, True])       # 102 不算，要 > 102
+
+    def test_band_holds_through_shallow_pullbacks(self):
+        """開啟後在帶內來回不換邊 —— 這正是要消掉的空轉。"""
+        from tw_backdraw.futures import ma_band_filter
+        # 均線 100 → 關閉門檻 98。99 與 98.5 都只是帶內回檔，97.5 才真的跌破
+        ic = [103.0, 99.0, 101.0, 98.5, 97.5]
+        self.assertEqual(ma_band_filter(ic, [100.0] * 5, 0.02, 0.02),
+                         [True, True, True, True, False])
+
+    def test_asymmetric_band(self):
+        from tw_backdraw.futures import ma_band_filter
+        ic = [104.0, 106.0, 96.0, 94.0]              # 開門檻 105，關門檻 95
+        self.assertEqual(ma_band_filter(ic, [100.0] * 4, 0.05, 0.05),
+                         [False, True, True, False])
+
+    def test_a_missing_average_forces_the_filter_off(self):
+        """指標算不出來就不持有，而且要重新突破才會再開。"""
+        from tw_backdraw.futures import ma_band_filter
+        ic = [103.0, 103.0, 101.5, 103.0]
+        self.assertEqual(
+            ma_band_filter(ic, [100.0, None, 100.0, 100.0], 0.02, 0.02),
+            [True, False, False, True])              # 101.5 未過 102 → 仍關
+        self.assertEqual(ma_band_filter(ic, [None] * 4, 0.02, 0.02),
+                         [False] * 4)
+
+    def test_filter_is_independent_of_whether_the_core_is_held(self):
+        """濾網描述的是趨勢狀態，不是部位狀態。
+
+        策略部位接手期間濾網照常更新，所以平倉後不必重新等一次向上突破。
+        """
+        from tw_backdraw.futures import core_overlay, ma_band_filter
+        ds = days(4)
+        fut = [100.0] * 4
+        ic = [103.0, 103.0, 103.0, 103.0]            # 全程都在開啟門檻之上
+        ent = [FuturesEntry(0, 1, 1.0, 103.0, 0.05)]  # D0 進、D1 出
+        ma = [100.0] * 4
+        self.assertEqual(ma_band_filter(ic, ma, 0.02, 0.02), [True] * 4)
+        _, _, ex = core_overlay(ds, fut, ent, FREE, ic, 0.5, ma,
+                                band_up=0.02, band_dn=0.02)
+        self.assertGreater(ex, 0.5)                  # 平倉後核心立刻接回來
+
+
+class TestCoreOverlayBand(unittest.TestCase):
+    def _run(self, ic, ma, band, core=1.0):
+        from tw_backdraw.futures import core_overlay
+        fut = [100.0 * (1.1 ** i) for i in range(len(ic))]
+        return core_overlay(days(len(ic)), fut, [], FREE, ic, core, ma,
+                            band_up=band, band_dn=band)
+
+    def test_default_band_reproduces_the_previous_behaviour(self):
+        ic = [101.0, 99.0, 101.5, 98.0, 102.0]
+        ma = [100.0] * 5
+        nav0, _, ex0 = self._run(ic, ma, 0.0)
+        from tw_backdraw.futures import core_overlay
+        fut = [100.0 * (1.1 ** i) for i in range(5)]
+        nav_ref, _, ex_ref = core_overlay(days(5), fut, [], FREE, ic, 1.0, ma)
+        self.assertEqual(nav0, nav_ref)
+        self.assertEqual(ex0, ex_ref)
+
+    def test_band_removes_the_whipsaw_round_trips(self):
+        """均線附近的來回震盪：逐日判定會進出四次，±2% 帶只進場一次。"""
+        ic = [103.0, 99.0, 101.0, 99.5, 101.5]
+        ma = [100.0] * 5
+        _, _, ex_daily = self._run(ic, ma, 0.0)
+        _, _, ex_band = self._run(ic, ma, 0.02)
+        self.assertLess(ex_daily, ex_band)           # 逐日被震出場，帶內續抱
+
+    def test_costs_are_charged_once_per_switch_not_per_day(self):
+        """帶內不動作 → 不扣成本。用有成本的模型驗證。"""
+        from tw_backdraw.futures import core_overlay
+        cost = FuturesCost(tax_rate=0.001, commission_per_lot=0.0)
+        ic = [103.0, 101.0, 99.0, 101.0, 101.5]
+        ma = [100.0] * 5
+        fut = [100.0] * 5                            # 期貨不動 → 淨值只剩成本
+        nav_d, _, _ = core_overlay(days(5), fut, [], cost, ic, 0.5, ma)
+        nav_b, _, _ = core_overlay(days(5), fut, [], cost, ic, 0.5, ma,
+                                   band_up=0.02, band_dn=0.02)
+        self.assertLess(nav_d[-1], nav_b[-1])        # 逐日多付了兩趟來回

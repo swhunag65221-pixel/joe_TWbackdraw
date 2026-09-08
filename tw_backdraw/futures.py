@@ -417,24 +417,62 @@ def entry_regime(bars, i: int, ma: list) -> str:
     return "below" if (m is not None and bars[i].close < m) else "above"
 
 
+def ma_band_filter(index_close: list[float], ma: list[float | None],
+                   band_up: float = 0.0, band_dn: float = 0.0) -> list[bool]:
+    """核心部位的均線濾網，帶**遲滯緩衝帶**（hysteresis band）。
+
+        關 → 開：收盤 > 均線 × (1 + band_up)
+        開 → 關：收盤 ≤ 均線 × (1 − band_dn)
+
+    兩條門檻中間是無動作區，收盤在均線附近來回不會反覆換邊。這解決的是
+    「站上、跌破、再站上」的空轉，不是交易成本 —— 成本本來就只有十萬分之二
+    的期交稅加每口 50 元手續費（見 `FuturesCost`）。
+
+    `band_up = band_dn = 0` 時**完全等價**於舊版的 `收盤 > 均線`：
+    開啟條件用嚴格大於、關閉條件用小於等於，收盤恰好等於均線時兩者都判為關；
+    均線尚未成形（`ma[i] is None`）則一律判為關，不沿用前一天的狀態
+    —— 指標算不出來就不持有，也讓帶寬 0 逐點重現舊行為。
+
+    狀態只由「收盤與均線的相對位置」決定，與核心當下有沒有真的持有無關。
+    策略部位接手期間濾網照常更新，所以策略平倉後不必重新等一次向上突破。
+    """
+    out: list[bool] = []
+    on = False
+    for c, m in zip(index_close, ma):
+        if m is None:
+            on = False
+        elif not on and c > m * (1.0 + band_up):
+            on = True
+        elif on and c <= m * (1.0 - band_dn):
+            on = False
+        out.append(on)
+    return out
+
+
 def core_overlay(dates: list[date], continuous: list[float],
                  entries: list["FuturesEntry"], cost: FuturesCost,
                  index_close: list[float], core_leverage: float,
                  ma: list[float | None],
                  step_gain: float | None = None,
-                 step_leverage: float = 1.0) -> tuple[list[float], list[FuturesTrade], float]:
+                 step_leverage: float = 1.0,
+                 band_up: float = 0.0,
+                 band_dn: float = 0.0) -> tuple[list[float], list[FuturesTrade], float]:
     """在 `vehicle_series` 之上，空手期間補一個低槓桿的核心部位。
 
-    核心只在**策略沒有部位**且**收盤高於均線**時持有，策略一有訊號就先平掉核心。
+    核心只在**策略沒有部位**且**均線濾網為開**時持有，策略一有訊號就先平掉核心。
     逆勢濾網（`trend_filter(below=True)`）只在收盤**低於**均線時進場，
     所以兩者天然互斥：低於均線做策略、高於均線抱核心，中間沒有重疊。
 
     時序與策略一致：`ma`/收盤在第 i 天收盤後判定，部位在當天期貨收盤建立，
     因此第 i 天的損益由**前一天**的判斷決定 —— 用當天判斷賺當天的報酬是前視偏誤。
 
+    Args:
+        band_up / band_dn: 均線濾網的遲滯緩衝帶，見 `ma_band_filter()`。
+            預設 0 等同舊版的 `收盤 > 均線`，逐日判定。
+
     回傳 (淨值, 策略交易明細, 有部位的日子佔比)。核心部位不算成交易筆數。
     """
-    on = [m is not None and c > m for c, m in zip(index_close, ma)]
+    on = ma_band_filter(index_close, ma, band_up, band_dn)
     by_entry = {e.entry_i: e for e in entries}
     nav = [1.0] * len(dates)
     detail: list[FuturesTrade] = []
