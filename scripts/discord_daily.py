@@ -7,6 +7,15 @@
     python3 scripts/discord_daily.py --dry-run       # 只印出，不送
     python3 scripts/discord_daily.py --only-if-action  # 沒有可能觸發的點位就不吵
 
+注碼規則（docs/strategy.md §20–§22「最終套件」，docs/final_package.md 有完整決策樹）
+------------------------------------------------------------------------------
+    進場日收盤 < MA200 → 固定 3x（每口小台需要 = 收盤 × 50 ÷ 3）
+    進場日收盤 ≥ MA200 → 半預算風險式：4% ÷ 停損距離，上限 2.5x
+                          （每口需要 = (收盤 − 停損線) × 1,250）
+    3x 部位權益達 +150%（期貨自進場價 +50%）→ 減碼到 1x，之後不加回（step-down）
+    空手且收盤 > MA200 → 核心 0.5x
+`--sizing risk --no-step-down` 可切回舊版（8% ÷ 停損距離、上限 5x、不減碼）。
+
 為什麼改成晚上跑
 ----------------
 訊號以**加權指數 13:30 收盤**判定，成交在**當日台指期 13:45 收盤** ——
@@ -14,7 +23,7 @@
 而且雲端排程的延遲完全不可控。
 
 但這些觸發點位**今晚就能全部算出來**：停損線、失效線、進場觸發價、
-均線交叉價，全部由已經收盤的資料決定，明天不會變。
+均線交叉價、減碼觸發價，全部由已經收盤的資料決定，明天不會變。
 唯一會動的是移動停利線（明天創新高才會往上移），而它只會對你有利。
 
 所以流程改成：**今晚拿到點位表 → 明天 13:30 只需比對收盤價 → 13:45 前下單。**
@@ -40,7 +49,8 @@ from tx_data import load_tx, login                                  # noqa: E402
 from tw_backdraw.config import PRESETS, StrategyConfig              # noqa: E402
 from tw_backdraw.engine import Engine, moving_average               # noqa: E402
 from tw_backdraw.futures import (FuturesCost, entries_from_trades,  # noqa: E402
-                                 futures_leverage, trade_details,
+                                 entry_regime, futures_leverage,
+                                 hybrid_entries, trade_details,
                                  vehicle_series)
 from tw_backdraw.levels import build_levels                         # noqa: E402
 from tw_backdraw.setup import detect_setups, scan_episodes          # noqa: E402
@@ -48,6 +58,12 @@ from tw_backdraw.setup import detect_setups, scan_episodes          # noqa: E402
 #: 依 docs/coverage.md 的驗收結論：空手時持有 0.5x 核心，濾網為指數 > MA200
 CORE_LEVERAGE = 0.5
 CORE_MA = 200
+#: §20 混合注碼：均線下固定 3x；均線上風險預算砍半（4%）
+BELOW_LEV = 3.0
+ABOVE_RISK_SCALE = 0.5
+#: §22 step-down：權益 +150% → 降到 1x
+STEP_GAIN = 1.5
+STEP_LEV = 1.0
 MTX_POINT = 50.0        # 小台每點新台幣
 
 GREEN, BLUE, YELLOW, RED, GREY = 0x2ECC71, 0x3498DB, 0xF1C40F, 0xE74C3C, 0x95A5A6
@@ -59,10 +75,13 @@ def pct(x: float) -> str:
 
 class Daily:
     def __init__(self, cfg: StrategyConfig, max_leverage: float,
-                 as_of: date | None = None, note: str = ""):
+                 as_of: date | None = None, note: str = "",
+                 sizing: str = "hybrid", step_down: bool = True):
         self.cfg = cfg
         self.max_leverage = max_leverage
         self.note = note
+        self.sizing = sizing
+        self.step_down = step_down
         self.bars, self.fs, self.missing = load_tx()
         if as_of is not None:            # 回放歷史某一天，用來驗證訊息內容
             keep = [i for i, b in enumerate(self.bars) if b.d <= as_of]
@@ -72,17 +91,31 @@ class Daily:
             self.fs = self.fs[:keep[-1] + 1]
         self.dates = [b.d for b in self.bars]
         self.ic = [b.close for b in self.bars]
+        self.ma_series = moving_average(self.bars, CORE_MA)
+        self.ma = self.ma_series[-1]
+
+        # 「均線上」規則的風險預算與槓桿上限；均線下固定 BELOW_LEV
+        if sizing == "hybrid":
+            self.risk = cfg.sizing.risk_per_trade * ABOVE_RISK_SCALE
+            self.cap = max_leverage * ABOVE_RISK_SCALE
+        else:
+            self.risk = cfg.sizing.risk_per_trade
+            self.cap = max_leverage
+
         res = Engine(cfg).run(self.bars, self.fs)
-        self.ent = entries_from_trades(res.trades, self.bars, cfg, max_leverage,
-                                       same_day=True)
-        self.nav, det = vehicle_series(self.dates, self.fs, self.ent,
-                                       FuturesCost(), self.ic)
+        ent = entries_from_trades(res.trades, self.bars, cfg, max_leverage,
+                                  same_day=True)
+        if sizing == "hybrid":
+            ent = hybrid_entries(ent, self.bars, CORE_MA, BELOW_LEV, ABOVE_RISK_SCALE)
+        self.ent = ent
+        self.nav, det = vehicle_series(
+            self.dates, self.fs, self.ent, FuturesCost(), self.ic,
+            step_gain=STEP_GAIN if step_down else None, step_leverage=STEP_LEV)
         self.details = trade_details(self.dates, self.nav, self.ent, det)
         live: list = []
         scan_episodes(self.bars, cfg.setup, live)
         self.live = live[0] if live else None
         self.setups = detect_setups(self.bars, cfg.setup)
-        self.ma = moving_average(self.bars, CORE_MA)[-1]
 
     # ---- 狀態判斷 ----
     @property
@@ -137,6 +170,69 @@ class Daily:
     def core_on(self) -> bool:
         return self.ma is not None and self.last.close > self.ma
 
+    # ---- 注碼：均線位置、槓桿、每口需要 ----
+    def regime_today(self) -> str:
+        """今天收盤適用哪一種注碼（今天觸發的訊號用）。"""
+        if self.sizing != "hybrid":
+            return "above"
+        return entry_regime(self.bars, len(self.bars) - 1, self.ma_series)
+
+    def regime_tomorrow(self, close: float) -> str:
+        """明天若收在 `close`，適用哪一種注碼。均線交叉價今晚就能算。"""
+        if self.sizing != "hybrid":
+            return "above"
+        cross = self.ma_cross_tomorrow()
+        return "below" if (cross is not None and close < cross) else "above"
+
+    def entry_leverage(self, close: float, lv, regime: str) -> float:
+        if regime == "below":
+            return BELOW_LEV
+        base = futures_leverage(close, lv, self.cfg, self.max_leverage)
+        return base * ABOVE_RISK_SCALE if self.sizing == "hybrid" else base
+
+    #: 均線上：每口小台所需權益 = 每點價值 ÷ 風險預算 × (收盤 − 停損線)
+    @property
+    def per_point(self) -> float:
+        return MTX_POINT / self.risk      # 50 ÷ 4% = 1,250（舊版 50 ÷ 8% = 625）
+
+    def cap_below(self, stop_line: float) -> float:
+        """低於這個收盤價，槓桿會撞到上限，改用「收盤 × 每點價值 ÷ 上限」。"""
+        m = self.cap
+        return stop_line * m / (m - self.risk)
+
+    def lot_cost(self, close: float, stop_line: float, regime: str) -> float:
+        """在這個收盤價與注碼下，一口小台需要多少權益。"""
+        if regime == "below":
+            return close * MTX_POINT / BELOW_LEV
+        if close < self.cap_below(stop_line):
+            return close * MTX_POINT / self.cap
+        return self.per_point * (close - stop_line)
+
+    def lot_formula(self, regime: str, stop_line: float | None = None) -> str:
+        if regime == "below":
+            return f"收盤 × {MTX_POINT:g} ÷ {BELOW_LEV:g}"
+        s = f"{stop_line:,.0f}" if stop_line is not None else "停損線"
+        return f"(收盤 − {s}) × {self.per_point:.0f}"
+
+    # ---- step-down ----
+    def step_trigger(self, t):
+        """3x 部位的減碼觸發：期貨自進場 +50%（權益 +150%）。回傳 (期貨倍率, 指數參考價) 或 None。"""
+        if not self.step_down or t is None:
+            return None
+        tr = t.trade
+        if tr.leverage <= STEP_LEV or tr.step_date is not None:
+            return None
+        ratio = 1.0 + STEP_GAIN / tr.leverage        # 3x：1.5 倍
+        return ratio, tr.entry_index * ratio
+
+    def stepped_today(self) -> bool:
+        t = self.open_trade
+        return bool(t and t.trade.step_date == self.last.d)
+
+    def current_leverage(self, t) -> float:
+        tr = t.trade
+        return tr.final_leverage if tr.final_leverage is not None else tr.leverage
+
     # ---- 三個區塊 ----
     def tomorrow_plan(self) -> tuple[str, str, int]:
         """明天 13:30 要比對的點位與對應動作。回傳 (標題, 內容, 顏色)。
@@ -178,6 +274,15 @@ class Daily:
                     f"⬆️ 收盤 **> {need:,.0f}**（{pct(need / c - 1)}）"
                     f"　→　創前高，**啟動移動停利**"
                     f"（自此以波段最高收盤回檔 {cfg.exit.trail_drawdown:.0%} 出場）")
+            st = self.step_trigger(t)
+            if st is not None:
+                ratio, idx_ref = st
+                rows.append(
+                    f"🔻 期貨收盤 **≥ 你的進場價 × {ratio:.2f}**（指數參考 ≈ {idx_ref:,.0f}，"
+                    f"{pct(idx_ref / c - 1)}）　→　**減碼到 {STEP_LEV:g}x**："
+                    f"口數 = 權益 ÷ (收盤 × {MTX_POINT:g})，之後不加回")
+            elif t.trade.step_date is not None:
+                rows.append(f"　　_已於 {t.trade.step_date} 減碼至 {STEP_LEV:g}x，不再調整口數。_")
             rows.append(f"🟡 以上都沒發生　→　**續抱，不動作**")
             colour = YELLOW if c / lv.stop_line - 1 < 0.02 else GREEN
             return ("📋 明日作戰表（持有中）", "\n".join(rows), colour)
@@ -190,18 +295,19 @@ class Daily:
                         f"⚪ 修復視窗已用盡（{cfg.setup.max_repair_bars} 日），"
                         f"這一段回檔作廢。\n"
                         f"明天起重新以區間最高點為錨，**不會有進場訊號**。", GREY)
-            lev = futures_leverage(
-                trig, build_levels(w.peak, w.trough, cfg.levels), cfg,
-                self.max_leverage)
             lv = build_levels(w.peak, w.trough, cfg.levels)
+            reg = self.regime_tomorrow(trig)
+            lev = self.entry_leverage(trig, lv, reg)
             rows = [
                 f"🟢 收盤 **≥ {trig:,.0f}**（{pct(trig / c - 1)}）"
                 f"　→　13:45 前**買進**，"
-                f"每 **{self.lot_cost(trig, lv.stop_line):,.0f}** 元 1 口小台"
-                f"（槓桿約 {lev:.2f}x）",
+                f"每 **{self.lot_cost(trig, lv.stop_line, reg):,.0f}** 元 1 口小台"
+                f"（{'固定 3x' if reg == 'below' else f'槓桿約 {lev:.2f}x'}）",
                 f"　　_進場後停損線 {lv.stop_line:,.0f}、失效線 {lv.invalidation:,.0f}，"
                 f"兩條都已固定，不隨進場價變動。_",
-                f"　　_收得越高、離停損越遠，每口要的錢就越多 —— 見下方速查表。_",
+            ]
+            rows.append(self.regime_note(trig, lv.stop_line, reg))
+            rows += [
                 f"🔻 收盤 **< {w.trough:,.0f}**（{pct(w.trough / c - 1)}）"
                 f"　→　破底，谷底與計時**全部重來**，觸發價跟著下移",
                 f"⚪ 介於兩者之間　→　**不動作**，視窗剩 **{w.bars_left - 1}** 個交易日",
@@ -222,6 +328,20 @@ class Daily:
                 f"　→　自高點 {anchor:,.0f} 回檔滿 {cfg.setup.min_drawdown:.0%}，"
                 f"開始追蹤新的一段（那天仍不進場）", GREY)
 
+    def regime_note(self, trig: float, stop_line: float, reg: str) -> str:
+        """說明明天的注碼取決於收盤與 MA200 交叉價的相對位置。"""
+        if self.sizing != "hybrid":
+            return "　　_收得越高、離停損越遠，每口要的錢就越多 —— 見下方速查表。_"
+        cross = self.ma_cross_tomorrow()
+        if cross is None:
+            return f"　　_均線資料不足，一律用半預算：每口 = {self.lot_formula('above', stop_line)}。_"
+        if reg == "below":
+            return (f"　　_觸發價在 MA200 交叉價 {cross:,.0f} 之下 → **固定 3x**"
+                    f"（每口 = {self.lot_formula('below')}）；若收盤反而 ≥ {cross:,.0f}，"
+                    f"改半預算：每口 = {self.lot_formula('above', stop_line)}。_")
+        return (f"　　_觸發價已在 MA200 交叉價 {cross:,.0f} 之上 → **半預算**"
+                f"（每口 = {self.lot_formula('above', stop_line)}，上限 {self.cap:g}x）。_")
+
     def trail_stop(self, t):
         """已創高時的移動停利價位。"""
         s = t.setup
@@ -232,75 +352,61 @@ class Daily:
         d = self.cfg.exit.trail_drawdown
         return hi * (1 - d), f"波段最高收盤 {hi:,.0f}，移動停利 {d:.0%}。"
 
-    def lot_capital(self, leverage: float) -> float:
-        """在這個槓桿下，一口小台需要多少權益。"""
-        return self.last.close * MTX_POINT / leverage
-
-    #: 每口小台所需權益 = 每點價值 ÷ 風險預算 × (收盤 − 停損線)
-    #: 這個係數與收盤價無關，所以「收盤 − 停損線」乘上它就是答案。
-    @property
-    def per_point(self) -> float:
-        return MTX_POINT / self.cfg.sizing.risk_per_trade      # 50 ÷ 8% = 625
-
-    def cap_below(self, stop_line: float) -> float:
-        """低於這個收盤價，槓桿會撞到上限，改用「收盤 × 每點價值 ÷ 上限」。"""
-        m = self.max_leverage
-        return stop_line * m / (m - self.cfg.sizing.risk_per_trade)
-
-    def lot_cost(self, close: float, stop_line: float) -> float:
-        """在這個收盤價下，一口小台需要多少權益。"""
-        if close < self.cap_below(stop_line):
-            return close * MTX_POINT / self.max_leverage
-        return self.per_point * (close - stop_line)
-
-    def sizing(self) -> str:
+    def sizing_block(self) -> str:
         """收盤後只要做一次減法、一次乘法就能算出口數。"""
-        k = self.per_point
         t = self.open_trade
-        stop = (t.levels.stop_line if t is not None else None)
-        if stop is None:
-            w = self.live
-            if w is None or w.state != "drawdown" or w.bars_left <= 0:
-                return (f"目前沒有可進場的劇本，暫時用不到。\n"
-                        f"_通則：每口小台需要 =（收盤 − 停損線）× {k:.0f}_")
-            stop = build_levels(w.peak, w.trough, self.cfg.levels).stop_line
-
-        cap = self.cap_below(stop)
-        lines = [
-            "```",
-            f"停損線 {stop:,.0f}　（今晚已定，明天不變）",
-            "",
-            f"每口小台需要 =（收盤 − {stop:,.0f}）× {k:.0f}",
-            f"口　　　數   = 你的權益 ÷ 上面那個數，無條件捨去",
-            "```",
-        ]
         if t is not None:
-            e = t.trade.entry_index
-            cost = self.lot_cost(e, stop)
-            lines.append(
-                f"核對手上的部位：({e:,.0f} − {stop:,.0f}) × {k:.0f} = "
-                f"**{cost:,.0f}** 元/口　（＝槓桿 {t.trade.leverage:.2f}x）")
+            tr, lv = t.trade, t.levels
+            reg = "below" if tr.leverage == BELOW_LEV and self.sizing == "hybrid" else "above"
+            cur = self.current_leverage(t)
+            lines = ["```",
+                     f"停損線 {lv.stop_line:,.0f}　（進場時已定，不變）",
+                     "",
+                     f"進場口數依據：每口 =（{self.lot_formula(reg, lv.stop_line)}）"
+                     f"→ ({tr.entry_index:,.0f}) 時 {self.lot_cost(tr.entry_index, lv.stop_line, reg):,.0f} 元/口"
+                     f"（＝槓桿 {tr.leverage:.2f}x）"]
+            if tr.step_date is not None:
+                lines.append(f"已於 {tr.step_date} 減碼至 {cur:g}x：每口 = 收盤 × {MTX_POINT:g}")
+            elif self.step_trigger(t) is not None:
+                ratio, idx_ref = self.step_trigger(t)
+                lines.append(f"減碼觸發：期貨 ≥ 進場價 × {ratio:.2f}（指數參考 {idx_ref:,.0f}）"
+                             f"→ 口數 = 權益 ÷ (收盤 × {MTX_POINT:g})")
+            lines.append("```")
             return "\n".join(lines)
 
-        trig = self.live.trigger_close(self.cfg.setup)
-        rows = ["```", f"{'明天收盤':>9}{'每口需要':>11}{'100萬':>7}{'300萬':>7}{'500萬':>7}"]
+        w = self.live
+        if w is None or w.state != "drawdown" or w.bars_left <= 0:
+            return ("目前沒有可進場的劇本，暫時用不到。\n"
+                    f"_通則：均線下 每口 = {self.lot_formula('below')}；"
+                    f"均線上 每口 = {self.lot_formula('above')}_")
+        lv = build_levels(w.peak, w.trough, self.cfg.levels)
+        stop = lv.stop_line
+        trig = w.trigger_close(self.cfg.setup)
+        cross = self.ma_cross_tomorrow()
+        lines = ["```", f"停損線 {stop:,.0f}　（今晚已定，明天不變）"]
+        if self.sizing == "hybrid" and cross is not None:
+            lines += [f"MA200 交叉價 {cross:,.0f}",
+                      "",
+                      f"收盤 < {cross:,.0f}：每口小台需要 = {self.lot_formula('below')}",
+                      f"收盤 ≥ {cross:,.0f}：每口小台需要 = {self.lot_formula('above', stop)}"]
+        else:
+            lines += ["", f"每口小台需要 = {self.lot_formula('above', stop)}"]
+        lines += ["口　　　數   = 你的權益 ÷ 上面那個數，無條件捨去", "```"]
+
+        rows = ["```", f"{'明天收盤':>9}{'注碼':>5}{'每口需要':>11}{'100萬':>7}{'300萬':>7}{'500萬':>7}"]
         for c in (trig, trig * 1.005, trig * 1.01, trig * 1.02, trig * 1.03):
-            cost = self.lot_cost(c, stop)
-            rows.append(f"{c:>9,.0f}{cost:>11,.0f}"
-                        + "".join(f"{int(cap_ // cost):>7}"
-                                 for cap_ in (1e6, 3e6, 5e6)))
+            reg = self.regime_tomorrow(c)
+            cost = self.lot_cost(c, stop, reg)
+            rows.append(f"{c:>9,.0f}{'3x' if reg == 'below' else '半':>5}{cost:>11,.0f}"
+                        + "".join(f"{int(cap_ // cost):>7}" for cap_ in (1e6, 3e6, 5e6)))
         rows.append("```")
         lines += ["速查表（觸發價起算）"] + rows
-        lv2 = build_levels(self.live.peak, self.live.trough, self.cfg.levels)
-        if futures_leverage(trig, lv2, self.cfg, self.max_leverage) >= self.max_leverage * 0.9:
-            lines.append(f"⚠️ 停損很近，槓桿已接近 {self.max_leverage:g}x 上限。"
-                         f"收盤低於 {cap:,.0f} 時改用「收盤 × "
-                         f"{MTX_POINT / self.max_leverage:.0f}」，"
-                         f"口數不再往上加。")
-        lines.append(f"_{k:.0f} = 小台每點 {MTX_POINT:g} 元 ÷ 風險預算 "
-                     f"{self.cfg.sizing.risk_per_trade:.0%}；"
-                     f"等價於「每筆最多虧掉權益的 "
-                     f"{self.cfg.sizing.risk_per_trade:.0%}」。_")
+        if self.sizing == "hybrid":
+            lines.append(f"_均線下固定 {BELOW_LEV:g}x；均線上 {self.per_point:.0f} = 小台每點 "
+                         f"{MTX_POINT:g} 元 ÷ 風險預算 {self.risk:.0%}（上限 {self.cap:g}x）。_")
+        else:
+            lines.append(f"_{self.per_point:.0f} = 小台每點 {MTX_POINT:g} 元 ÷ 風險預算 "
+                         f"{self.risk:.0%}；等價於「每筆最多虧掉權益的 {self.risk:.0%}」。_")
         return "\n".join(lines)
 
     def today(self) -> str:
@@ -308,10 +414,11 @@ class Daily:
         fired = self.fired_today
         if fired is not None:
             lv = build_levels(fired.peak, fired.trough, self.cfg.levels)
-            lev = futures_leverage(self.last.close, lv, self.cfg, self.max_leverage)
+            reg = self.regime_today()
+            lev = self.entry_leverage(self.last.close, lv, reg)
             return (f"🟢 **今天收盤觸發進場訊號** —— 若尚未建立部位，"
-                    f"明天開盤補進（槓桿 {lev:.2f}x），但進場價會與訊號日不同，"
-                    f"風險略高於回測假設。\n"
+                    f"明天開盤補進（{'固定 3x' if reg == 'below' else f'槓桿 {lev:.2f}x'}），"
+                    f"但進場價會與訊號日不同，風險略高於回測假設。\n"
                     f"{fired.peak_date} 高點 {fired.peak:,.0f} → {fired.trough_date} "
                     f"谷底 {fired.trough:,.0f}（回檔 {fired.drop_pct:.1%}），"
                     f"{fired.bars_to_repair} 日補回 {fired.repair_fraction:.0%}")
@@ -320,6 +427,11 @@ class Daily:
             return (f"🔴 **今天收盤出場** —— {t.exit_reason}\n"
                     f"本筆權益報酬 **{t.trade.ret:+.1%}**"
                     f"（持有 {t.bars_held} 個交易日）")
+        if self.stepped_today():
+            t = self.open_trade
+            return (f"🔻 **今天收盤觸發減碼** —— 權益已達 +{STEP_GAIN:.0%}，"
+                    f"應已減碼至 {STEP_LEV:g}x（口數 = 權益 ÷ (收盤 × {MTX_POINT:g})）。"
+                    f"沒做的話明天開盤補做。")
         t = self.open_trade
         if t is not None:
             lv = t.levels
@@ -337,9 +449,12 @@ class Daily:
         s, lv, tr = t.setup, t.levels, t.trade
         c = self.last.close
         stop, why = self.trail_stop(t)
+        cur = self.current_leverage(t)
+        lev_txt = (f"槓桿 **{tr.leverage:.2f}x**" if tr.step_date is None
+                   else f"槓桿 {tr.leverage:.2f}x → **已減碼 {cur:g}x**（{tr.step_date}）")
         lines = [
             f"進場 **{tr.entry_date}** @ 指數 {tr.entry_index:,.0f}"
-            f"　槓桿 **{tr.leverage:.2f}x**　持有 {t.bars_held} 日",
+            f"　{lev_txt}　持有 {t.bars_held} 日",
             f"訊號 {s.peak_date} 高點 {s.peak:,.0f} → {s.trough_date} 谷底 {s.trough:,.0f}"
             f"（回檔 {s.drop_pct:.1%}），{s.bars_to_repair} 日補回 {s.repair_fraction:.0%}",
             f"目前指數 {c:,.0f}　期貨報酬 {tr.futures_return:+.1%}"
@@ -415,7 +530,7 @@ class Daily:
     def has_action(self) -> bool:
         """明天是否有實際可能被觸發的點位（用於 --only-if-action）。"""
         if (self.fired_today or self.opened_today or self.closed_today
-                or self.exit_signal_today()):
+                or self.exit_signal_today() or self.stepped_today()):
             return True
         t = self.open_trade
         if t is not None:
@@ -423,6 +538,11 @@ class Daily:
             stop, _ = self.trail_stop(t)
             if stop is not None and c / stop - 1 < 0.03:
                 return True
+            st = self.step_trigger(t)
+            if st is not None:
+                i0 = self.dates.index(t.trade.entry_date)
+                if self.fs[-1] / self.fs[i0] >= st[0] * 0.97:
+                    return True
             return c / t.levels.stop_line - 1 < 0.03
         w = self.live
         if w and w.state == "drawdown":
@@ -442,13 +562,15 @@ class Daily:
         fired = self.fired_today
         if fired is not None:
             lv = build_levels(fired.peak, fired.trough, cfg.levels)
-            cost = self.lot_cost(c, lv.stop_line)
+            reg = self.regime_today()
+            cost = self.lot_cost(c, lv.stop_line, reg)
             # 這則訊息在收盤後才送達，13:45 的下單窗口已經過了 ——
             # 所以是「確認」而非「指示」，寫成命令句會讓人以為還來得及。
             return ("🟢 今天已觸發進場",
                     "\n".join(head + ["",
                         f"✅ 依昨日作戰表，**應已在 13:45 前買進** —— "
-                        f"每口 {cost:,.0f}（口數 = 權益 ÷ {cost:,.0f}，捨去）",
+                        f"每口 {cost:,.0f}（口數 = 權益 ÷ {cost:,.0f}，捨去；"
+                        f"{'固定 3x，均線下' if reg == 'below' else '半預算，均線上'}）",
                         f"停損 **{lv.stop_line:,.0f}**（{lv.stop_line / c - 1:+.1%}）"
                         f"　失效 {lv.invalidation:,.0f}",
                         f"回檔 {fired.drop_pct:.1%}，"
@@ -476,13 +598,24 @@ class Daily:
             tr = t.trade
             stop, _ = self.trail_stop(t)
             binding = max(lv.stop_line, stop) if stop is not None else lv.stop_line
+            if self.stepped_today():
+                head.append(f"🔻 **今天已觸發減碼**：權益 +{STEP_GAIN:.0%}，應已減碼至 {STEP_LEV:g}x"
+                            f"（口數 = 權益 ÷ (收盤 × {MTX_POINT:g})）")
             rows.append(f"🔴 跌破 **{binding:,.0f}**（{binding / c - 1:+.1%}）→ 13:45 前平倉")
             if stop is None:
                 rows.append(f"⬆️ 站上 **{t.setup.peak:,.0f}**"
                             f"（{t.setup.peak / c - 1:+.1%}）→ 啟動移動停利")
+            st = self.step_trigger(t)
+            if st is not None:
+                ratio, idx_ref = st
+                rows.append(f"🔻 期貨 ≥ 進場價×{ratio:.2f}（指數≈{idx_ref:,.0f}，"
+                            f"{idx_ref / c - 1:+.1%}）→ 減碼到 {STEP_LEV:g}x")
             rows.append("🟡 其餘 → 不動作")
-            tail = (f"持有 `{tr.entry_date:%m-%d}` 進場 · {tr.leverage:.2f}x · "
-                    f"**{tr.ret:+.1%}** · 每口 {self.lot_cost(tr.entry_index, lv.stop_line):,.0f}")
+            cur = self.current_leverage(t)
+            lev_txt = f"{tr.leverage:.2f}x" if tr.step_date is None else f"{tr.leverage:.2f}x→{cur:g}x"
+            reg = "below" if tr.leverage == BELOW_LEV and self.sizing == "hybrid" else "above"
+            tail = (f"持有 `{tr.entry_date:%m-%d}` 進場 · {lev_txt} · "
+                    f"**{tr.ret:+.1%}** · 進場每口 {self.lot_cost(tr.entry_index, lv.stop_line, reg):,.0f}")
             colour = YELLOW if c / binding - 1 < 0.02 else GREEN
             title = "🟡 續抱" if colour == GREEN else "🟠 貼近出場線"
             return (title, "\n".join(head + [""] + rows + ["", tail]), colour)
@@ -491,15 +624,23 @@ class Daily:
         if w is not None and w.state == "drawdown" and w.bars_left > 0:
             lv = build_levels(w.peak, w.trough, cfg.levels)
             trig = w.trigger_close(cfg.setup)
+            reg = self.regime_tomorrow(trig)
             head[0] += f" · 視窗剩 **{w.bars_left - 1}** 日"
             rows = [
                 f"🟢 站上 **{trig:,.0f}**（{trig / c - 1:+.1%}）→ 買進，"
-                f"每口 {self.lot_cost(trig, lv.stop_line):,.0f}",
+                f"每口 {self.lot_cost(trig, lv.stop_line, reg):,.0f}"
+                f"（{'固定 3x' if reg == 'below' else '半預算'}）",
                 f"🔻 跌破 **{w.trough:,.0f}**（{w.trough / c - 1:+.1%}）→ 破底重來",
                 "⚪ 其餘 → 不動作",
             ]
-            tail = (f"口數 = 權益 ÷ [(收盤 − {lv.stop_line:,.0f}) × {self.per_point:.0f}]，捨去"
-                    f"　進場後停損 {lv.stop_line:,.0f}")
+            cross = self.ma_cross_tomorrow()
+            if self.sizing == "hybrid" and cross is not None:
+                tail = (f"口數 = 權益 ÷ [收盤 < {cross:,.0f}：{self.lot_formula('below')}；"
+                        f"否則 {self.lot_formula('above', lv.stop_line)}]，捨去"
+                        f"　進場後停損 {lv.stop_line:,.0f}")
+            else:
+                tail = (f"口數 = 權益 ÷ [{self.lot_formula('above', lv.stop_line)}]，捨去"
+                        f"　進場後停損 {lv.stop_line:,.0f}")
             colour = GREEN if trig / c - 1 < 0.01 else BLUE
             return ("⚪ 追蹤中", "\n".join(head + [""] + rows + ["", tail]), colour)
 
@@ -511,6 +652,13 @@ class Daily:
         start = anchor * (1 - cfg.setup.min_drawdown)
         return ("⚪ 空手", "\n".join(head + ["", "明天不會有訊號",
                 f"🔻 跌破 **{start:,.0f}**（{start / c - 1:+.1%}）→ 開始追蹤新的一段"]), GREY)
+
+    def rule_tag(self) -> str:
+        if self.sizing == "hybrid":
+            return (f"注碼 均線下 {BELOW_LEV:g}x／均線上 {self.risk:.0%}÷停損距離≤{self.cap:g}x"
+                    + (f"　減碼 +{STEP_GAIN:.0%}→{STEP_LEV:g}x" if self.step_down else ""))
+        return (f"參數組 tuned　槓桿上限 {self.max_leverage:g}x"
+                + (f"　減碼 +{STEP_GAIN:.0%}→{STEP_LEV:g}x" if self.step_down else ""))
 
     def payload(self, full: bool = False) -> dict:
         note = f"{self.note}\n" if self.note else ""
@@ -524,7 +672,7 @@ class Daily:
         title, body, colour = self.tomorrow_plan()
         fields = [
             {"name": "① 明天 13:30 比對收盤價", "value": body, "inline": False},
-            {"name": "② 收盤後怎麼算口數", "value": self.sizing(), "inline": False},
+            {"name": "② 收盤後怎麼算口數", "value": self.sizing_block(), "inline": False},
             {"name": "③ 今天發生了什麼", "value": self.today(), "inline": False},
             {"name": "④ 部位現況", "value": self.position(), "inline": False},
             {"name": "⑤ 劇本追蹤", "value": self.script(), "inline": False},
@@ -532,8 +680,7 @@ class Daily:
              "inline": False},
         ]
         foot = (f"點位由已收盤資料決定，明天不會變　|　"
-                f"下單窗口 13:30–13:45　|　參數組 tuned　"
-                f"槓桿上限 {self.max_leverage:g}x")
+                f"下單窗口 13:30–13:45　|　{self.rule_tag()}")
         if self.missing:
             foot += f"　|　⚠️ {len(self.missing)} 個換倉日缺次月報價"
         return {"embeds": [{
@@ -565,11 +712,15 @@ def render_text(p: dict) -> str:
     return "\n".join(out).replace("**", "").replace("`", "")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="每日訊號推送到 Discord")
     ap.add_argument("--webhook", default=os.environ.get("DISCORD_WEBHOOK_URL"))
     ap.add_argument("--preset", default="tuned")
     ap.add_argument("--max-leverage", type=float, default=5.0)
+    ap.add_argument("--sizing", default="hybrid", choices=("hybrid", "risk"),
+                    help="hybrid＝§20 混合注碼（預設）；risk＝舊版 8%% ÷ 停損距離")
+    ap.add_argument("--no-step-down", action="store_true",
+                    help="關閉 §22 的 step-down（權益 +150%% → 降到 1x）")
     ap.add_argument("--dry-run", action="store_true", help="只印出，不送出")
     ap.add_argument("--only-if-action", action="store_true",
                     help="沒有動作也沒有接近觸發時，不送訊息")
@@ -581,12 +732,13 @@ def main() -> int:
                     help="完整版（六個區塊）。預設是只有觸發點位的精簡版")
     ap.add_argument("--note", default="",
                     help="在訊息開頭加一行提示，例如標明這是回放而非即時訊號")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     login()
     as_of = (date.fromisoformat(args.as_of) if args.as_of else None)
     note = args.note or ("⚠️ **這是回放，不是即時訊號**" if as_of else "")
-    d = Daily(PRESETS[args.preset], args.max_leverage, as_of, note)
+    d = Daily(PRESETS[args.preset], args.max_leverage, as_of, note,
+              sizing=args.sizing, step_down=not args.no_step_down)
 
     lag = (date.today() - d.last.d).days
     if as_of is None and lag > args.stale_days:

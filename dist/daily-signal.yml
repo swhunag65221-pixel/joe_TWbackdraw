@@ -1,0 +1,81 @@
+name: 明日作戰表 → Discord
+
+# 前一晚執行（13:00 UTC = 21:00 台北，FinLab 當日收盤資料通常已更新）。
+# 所有觸發點位由當天已收盤的資料決定，明天不會變動，排程延遲幾分鐘也無所謂。
+#
+# 設定：Settings → Secrets and variables → Actions 新增
+#   FINLAB_API_TOKEN     FinLab API token
+#   DISCORD_WEBHOOK_URL  Discord webhook
+# 把 tx_daily_signal.py 放在 repo 根目錄，本檔放到 .github/workflows/。
+on:
+  schedule:
+    - cron: "0 13 * * 0-4"      # 週日至週四晚間 → 產出隔一個交易日的作戰表
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: "依據某一天的收盤回放（YYYY-MM-DD），留空則用最新資料"
+        required: false
+      full:
+        description: "完整版（六個區塊）"
+        type: boolean
+        default: false
+      dry_run:
+        description: "只印在 log，不送到 Discord"
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-signal
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 檢查 secrets
+        env:
+          TOKEN: ${{ secrets.FINLAB_API_TOKEN }}
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          missing=""
+          [ -z "$TOKEN" ] && missing="$missing FINLAB_API_TOKEN"
+          [ -z "$HOOK" ]  && missing="$missing DISCORD_WEBHOOK_URL"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少 repository secret:$missing"
+            exit 1
+          fi
+          echo "secrets 齊全"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install --quiet finlab pandas tzdata
+
+      - name: 產出明日作戰表
+        env:
+          Finlab_API_token: ${{ secrets.FINLAB_API_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python3 tx_daily_signal.py \
+            ${{ inputs.as_of && format('--as-of {0}', inputs.as_of) || '' }} \
+            ${{ inputs.full && '--full' || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: 失敗時通知 Discord
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "沒有 webhook，略過通知"
+            exit 0
+          fi
+          python3 tx_daily_signal.py notify \
+            --webhook "$HOOK" --color red \
+            --title "⚠️ 明日作戰表產生失敗" \
+            --text "今晚沒有作戰表。[查看 log]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+          明天 13:30 請自行比對上一則訊息的點位 —— 停損線與觸發價不會因為這次失敗而改變。"

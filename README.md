@@ -286,8 +286,10 @@ scripts/
   walk_forward_sizing.py 注碼規則層的逐筆錨定 walk-forward（§21）
   lab_mdd/         多代理 MDD 研究：回吐／核心／分散／最終套件（§22，報告在 docs/lab_mdd/）
   make_futures_notebook.py 台指期 Colab notebook 產生器（嵌入原始碼＋換倉價差）
+  make_daily_script.py 每日訊號單檔產生器（可放到任何 GitHub 帳號的 Action）
 notebooks/         Colab 用的 .ipynb（tw50_2x_finlab／tx_futures_finlab）
-dist/              單檔可執行的腳本（tx_futures_backtest.py）
+dist/              單檔可執行的腳本（tx_daily_signal.py 每日訊號＋daily-signal.yml、tx_futures_backtest.py 回測）
+docs/final_package.md 每日訊息採用的注碼規則（混合注碼＋核心＋step-down）：完整說明與決策樹
 docs/strategy.md   完整策略說明
 docs/futures_trades_2014_2026.md  台指期逐筆交易明細（2014–2026）
 docs/etf_trades_2018_2026.md      UPRO / TQQQ 逐筆交易明細（2018–2026）
