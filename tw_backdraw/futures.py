@@ -417,12 +417,38 @@ def entry_regime(bars, i: int, ma: list) -> str:
     return "below" if (m is not None and bars[i].close < m) else "above"
 
 
+def core_state(index_close: list[float], ma: list[float | None],
+               band: float = 0.0) -> list[bool]:
+    """核心部位的開關序列（只看價格與均線，不看策略部位）。
+
+    band = 0：收盤 > MA 即開、收盤 ≤ MA 即關（原始規則）。
+    band > 0：**遲滯帶**——收盤 > MA×(1+band) 才開，之後要收盤 < MA×(1−band) 才關；
+    介於兩者之間維持前一天的狀態。均線資料不足時一律關。
+    docs/strategy.md §23：±2% 把 27 年的核心進出從 104 段減到 31 段，
+    樣本內改善但未通過逐筆錨定 walk-forward，屬操作性選擇。
+    """
+    out: list[bool] = []
+    on = False
+    for c, m in zip(index_close, ma):
+        if m is None:
+            on = False
+        elif band <= 0:
+            on = c > m
+        elif not on and c > m * (1.0 + band):
+            on = True
+        elif on and c < m * (1.0 - band):
+            on = False
+        out.append(on)
+    return out
+
+
 def core_overlay(dates: list[date], continuous: list[float],
                  entries: list["FuturesEntry"], cost: FuturesCost,
                  index_close: list[float], core_leverage: float,
                  ma: list[float | None],
                  step_gain: float | None = None,
-                 step_leverage: float = 1.0) -> tuple[list[float], list[FuturesTrade], float]:
+                 step_leverage: float = 1.0,
+                 band: float = 0.0) -> tuple[list[float], list[FuturesTrade], float]:
     """在 `vehicle_series` 之上，空手期間補一個低槓桿的核心部位。
 
     核心只在**策略沒有部位**且**收盤高於均線**時持有，策略一有訊號就先平掉核心。
@@ -434,7 +460,7 @@ def core_overlay(dates: list[date], continuous: list[float],
 
     回傳 (淨值, 策略交易明細, 有部位的日子佔比)。核心部位不算成交易筆數。
     """
-    on = [m is not None and c > m for c, m in zip(index_close, ma)]
+    on = core_state(index_close, ma, band)
     by_entry = {e.entry_i: e for e in entries}
     nav = [1.0] * len(dates)
     detail: list[FuturesTrade] = []
