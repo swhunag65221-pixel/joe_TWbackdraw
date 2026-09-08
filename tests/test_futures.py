@@ -428,3 +428,39 @@ class TestHybridEntriesAndStepDown(unittest.TestCase):
         nav_v, det_v = vehicle_series(ds, fut, ent, FREE, [100.0] * 5, step_gain=1.5)
         self.assertEqual(nav_c, nav_v)
         self.assertEqual(det_c[0].step_date, det_v[0].step_date)
+
+
+class TestCoreBand(unittest.TestCase):
+    """§23 核心遲滯帶：站上 MA×(1+b) 才開、跌破 MA×(1−b) 才關。"""
+
+    def test_band_zero_is_the_plain_cross(self):
+        from tw_backdraw.futures import core_state
+        ma = [100.0] * 4
+        self.assertEqual(core_state([101.0, 100.0, 99.0, 100.5], ma, 0.0),
+                         [True, False, False, True])
+
+    def test_band_needs_a_margin_to_open_and_to_close(self):
+        from tw_backdraw.futures import core_state
+        ma = [100.0] * 6
+        closes = [101.0, 102.5, 99.0, 98.5, 97.0, 101.0]
+        # 101 不夠（需 >102）；102.5 開；99、98.5 仍在帶內維持；97 (<98) 關；101 不夠再開
+        self.assertEqual(core_state(closes, ma, 0.02),
+                         [False, True, True, True, False, False])
+
+    def test_undefined_average_forces_off(self):
+        from tw_backdraw.futures import core_state
+        self.assertEqual(core_state([105.0, 105.0], [None, 100.0], 0.02), [False, True])
+
+    def test_core_overlay_uses_the_band(self):
+        from tw_backdraw.futures import core_overlay
+        ds = days(4)
+        fut = [100.0, 110.0, 121.0, 133.1]
+        ma = [100.0] * 4
+        # 帶寬 0：第 0 天收盤 100 不大於 MA → 第 1 天才開（收 110）；
+        # 帶寬 5%：第 1 天 110 > 105 才開。兩者第 2 天起都持有 → 差在第 1→2 天的報酬
+        nav0, _, _ = core_overlay(ds, fut, [], FREE, fut, 0.5, ma)
+        nav5, _, _ = core_overlay(ds, fut, [], FREE, fut, 0.5, ma, band=0.05)
+        self.assertEqual(nav0, nav5)                       # 這個例子兩者開在同一天
+        nav_wide, _, _ = core_overlay(ds, fut, [], FREE, fut, 0.5, ma, band=0.15)
+        # 帶寬 15%：第 1 天 110 < 115 未開，第 2 天 121 > 115 才開 → 少賺第 2→3 天之前那段
+        self.assertLess(nav_wide[-1], nav0[-1])

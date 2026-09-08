@@ -48,16 +48,19 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from tx_data import load_tx, login                                  # noqa: E402
 from tw_backdraw.config import PRESETS, StrategyConfig              # noqa: E402
 from tw_backdraw.engine import Engine, moving_average               # noqa: E402
-from tw_backdraw.futures import (FuturesCost, entries_from_trades,  # noqa: E402
-                                 entry_regime, futures_leverage,
-                                 hybrid_entries, trade_details,
-                                 vehicle_series)
+from tw_backdraw.futures import (FuturesCost, core_state,           # noqa: E402
+                                 entries_from_trades, entry_regime,
+                                 futures_leverage, hybrid_entries,
+                                 trade_details, vehicle_series)
 from tw_backdraw.levels import build_levels                         # noqa: E402
 from tw_backdraw.setup import detect_setups, scan_episodes          # noqa: E402
 
 #: 依 docs/coverage.md 的驗收結論：空手時持有 0.5x 核心，濾網為指數 > MA200
 CORE_LEVERAGE = 0.5
 CORE_MA = 200
+#: §23 遲滯帶：收盤 > MA200×(1+band) 才建核心、收盤 < MA200×(1−band) 才平。
+#: 樣本內把 27 年的核心進出從 104 段減到 31 段；未通過 walk-forward，屬操作性選擇。
+CORE_BAND = 0.02
 #: §20 混合注碼：均線下固定 3x；均線上風險預算砍半（4%）
 BELOW_LEV = 3.0
 ABOVE_RISK_SCALE = 0.5
@@ -93,6 +96,8 @@ class Daily:
         self.ic = [b.close for b in self.bars]
         self.ma_series = moving_average(self.bars, CORE_MA)
         self.ma = self.ma_series[-1]
+        #: 核心的開關狀態（遲滯帶），與 core_overlay() 同一個函式
+        self.core_series = core_state(self.ic, self.ma_series, CORE_BAND)
 
         # 「均線上」規則的風險預算與槓桿上限；均線下固定 BELOW_LEV
         if sizing == "hybrid":
@@ -168,7 +173,8 @@ class Daily:
 
     @property
     def core_on(self) -> bool:
-        return self.ma is not None and self.last.close > self.ma
+        """今天收盤後核心應處於持有狀態（含遲滯帶）。"""
+        return bool(self.core_series and self.core_series[-1])
 
     # ---- 注碼：均線位置、槓桿、每口需要 ----
     def regime_today(self) -> str:
@@ -503,29 +509,37 @@ class Daily:
         if self.ma is None:
             return "資料不足，無法計算均線。"
         above = c / self.ma - 1
-        verb = "站上" if self.core_on else "跌破"
-        line = (f"MA{CORE_MA} = {self.ma:,.0f}，指數{verb}均線 {above:+.1%}")
-        cross = self.ma_cross_tomorrow()
-        if cross is not None:
-            side = "跌破" if self.core_on else "站上"
-            line += (f"\n明日交叉價 **{cross:,.0f}**（{pct(cross / c - 1)}）"
-                     f"　→　收在這之{'下' if self.core_on else '上'}就{side}")
+        line = (f"MA{CORE_MA} = {self.ma:,.0f}，指數在均線{'上' if above > 0 else '下'} "
+                f"{above:+.1%}　核心狀態：{'持有' if self.core_on else '空手'}"
+                f"（遲滯帶 ±{CORE_BAND:.0%}）")
+        if self.core_on:
+            sell = self.ma_cross_tomorrow(1.0 - CORE_BAND)
+            if sell is not None:
+                line += (f"\n明日平倉價 **{sell:,.0f}**（{pct(sell / c - 1)}，MA×{1 - CORE_BAND:.2f}）"
+                         f"　→　收在這之下就平掉核心；否則續抱")
+        else:
+            buy = self.ma_cross_tomorrow(1.0 + CORE_BAND)
+            if buy is not None:
+                line += (f"\n明日建倉價 **{buy:,.0f}**（{pct(buy / c - 1)}，MA×{1 + CORE_BAND:.2f}）"
+                         f"　→　收在這之上就建核心 {CORE_LEVERAGE:g}x；否則維持空手")
         if self.open_trade is not None:
             return line + ("\n→ 目前有策略部位，**核心部位不啟用**"
-                           "（核心只在策略空手時填補曝險）")
+                           "（核心只在策略空手時填補曝險；狀態仍逐日更新，出場後依狀態接手）")
         state = "**持有中**" if self.core_on else "**空手**"
         return line + f"\n→ 策略空手，核心 {CORE_LEVERAGE:g}x {state}"
 
-    def ma_cross_tomorrow(self) -> float | None:
-        """明天恰好站上／跌破均線的收盤價。
+    def ma_cross_tomorrow(self, mult: float = 1.0) -> float | None:
+        """明天收盤恰好等於「明日均線 × mult」的價位。
 
-        明日均線 = (前 N-1 根收盤和 + 明日收盤) / N，
-        所以「明日收盤 > 明日均線」等價於「明日收盤 > 前 N-1 根收盤和 / (N-1)」——
-        今晚就能算出確切的交叉價，不必等明天。
+        明日均線 = (前 N-1 根收盤和 S + 明日收盤 c) / N，
+        「c > mult × 明日均線」⇔ c > mult × S / (N − mult) ——
+        今晚就能算出確切的價位，不必等明天。mult=1 是原本的交叉價，
+        mult=1±band 是遲滯帶的建倉價／平倉價。
         """
         if len(self.ic) < CORE_MA:
             return None
-        return sum(self.ic[-(CORE_MA - 1):]) / (CORE_MA - 1)
+        s = sum(self.ic[-(CORE_MA - 1):])
+        return mult * s / (CORE_MA - mult)
 
     def has_action(self) -> bool:
         """明天是否有實際可能被觸發的點位（用於 --only-if-action）。"""
@@ -656,7 +670,8 @@ class Daily:
     def rule_tag(self) -> str:
         if self.sizing == "hybrid":
             return (f"注碼 均線下 {BELOW_LEV:g}x／均線上 {self.risk:.0%}÷停損距離≤{self.cap:g}x"
-                    + (f"　減碼 +{STEP_GAIN:.0%}→{STEP_LEV:g}x" if self.step_down else ""))
+                    + (f"　減碼 +{STEP_GAIN:.0%}→{STEP_LEV:g}x" if self.step_down else "")
+                    + f"　核心 {CORE_LEVERAGE:g}x ±{CORE_BAND:.0%}")
         return (f"參數組 tuned　槓桿上限 {self.max_leverage:g}x"
                 + (f"　減碼 +{STEP_GAIN:.0%}→{STEP_LEV:g}x" if self.step_down else ""))
 
