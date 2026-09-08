@@ -13,10 +13,10 @@
     進場日收盤 ≥ MA200 → 半預算風險式：4% ÷ 停損距離，上限 2.5x
                           （每口需要 = (收盤 − 停損線) × 1,250）
     3x 部位權益達 +150%（期貨自進場價 +50%）→ 減碼到 1x，之後不加回（step-down）
-    空手且收盤 > MA200 → 核心 0.5x
+    空手 → 核心 0.5x，濾網為 MA200 加 ±2% 遲滯緩衝帶：
+                          站上 MA200×1.02 才開、跌破 MA200×0.98 才關，帶內不動作
 `--sizing risk --no-step-down` 可切回舊版（8% ÷ 停損距離、上限 5x、不減碼）。
-`--core-band 0.02` 給核心濾網加遲滯緩衝帶，減少均線附近的空轉
-（docs/coverage.md「核心濾網的緩衝帶」）。預設 0＝維持逐日判定。
+`--core-band 0` 可把核心切回逐日 `收盤 > MA200`（docs/coverage.md §5）。
 
 為什麼改成晚上跑
 ----------------
@@ -60,9 +60,9 @@ from tw_backdraw.setup import detect_setups, scan_episodes          # noqa: E402
 #: 依 docs/coverage.md 的驗收結論：空手時持有 0.5x 核心，濾網為指數 > MA200
 CORE_LEVERAGE = 0.5
 CORE_MA = 200
-#: 核心濾網的遲滯緩衝帶（docs/coverage.md §核心濾網的緩衝帶）。
-#: 0 = 逐日 `收盤 > MA200`，與上線以來的行為相同；用 --core-band 才會啟用。
-CORE_BAND = 0.0
+#: 核心濾網的遲滯緩衝帶（docs/coverage.md §5）。站上 MA200×1.02 才開、
+#: 跌破 MA200×0.98 才關，帶內不動作。用 `--core-band 0` 可切回逐日判定。
+CORE_BAND = 0.02
 #: §20 混合注碼：均線下固定 3x；均線上風險預算砍半（4%）
 BELOW_LEV = 3.0
 ABOVE_RISK_SCALE = 0.5
@@ -746,8 +746,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-step-down", action="store_true",
                     help="關閉 §22 的 step-down（權益 +150%% → 降到 1x）")
     ap.add_argument("--core-band", type=float, default=CORE_BAND, metavar="X",
-                    help="核心濾網的遲滯緩衝帶，例如 0.02 代表站上 MA200×1.02 才開、"
-                         "跌破 MA200×0.98 才關。預設 %(default)g＝逐日判定")
+                    help="核心濾網的遲滯緩衝帶：站上 MA200×(1+X) 才開、"
+                         "跌破 MA200×(1−X) 才關。預設 %(default)g，"
+                         "傳 0 可切回逐日 `收盤 > MA200`")
     ap.add_argument("--dry-run", action="store_true", help="只印出，不送出")
     ap.add_argument("--only-if-action", action="store_true",
                     help="沒有動作也沒有接近觸發時，不送訊息")
