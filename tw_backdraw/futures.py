@@ -118,6 +118,10 @@ class FuturesTrade:
     stop_distance: float
     futures_return: float    # 期貨本身的報酬
     ret: float               # 權益報酬（已扣進出場成本）
+    #: step-down 之後的槓桿（沒有觸發時等於 leverage）
+    final_leverage: float | None = None
+    #: step-down 觸發日（沒有觸發時為 None）
+    step_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -165,15 +169,34 @@ def entries_from_trades(trades, bars, cfg: StrategyConfig,
     return out
 
 
+def _step_down(v: float, lev: float, anchor: float, f0: float, fut: float,
+               rate: float, target: float) -> float:
+    """把固定口數部位減到 `target` 倍：平掉多出來的名目，扣一次單邊成本。
+
+    回傳扣完成本後的權益；呼叫端把錨點重設為 (v, 今日期貨, target)。
+    """
+    cur_notional = lev * anchor * fut / f0
+    delta = max(cur_notional - target * v, 0.0)
+    return v - delta * rate
+
+
 def vehicle_series(dates: list[date], continuous: list[float],
                    entries: list[FuturesEntry], cost: FuturesCost,
-                   index_close: list[float]) -> tuple[list[float], list[FuturesTrade]]:
+                   index_close: list[float],
+                   step_gain: float | None = None,
+                   step_leverage: float = 1.0) -> tuple[list[float], list[FuturesTrade]]:
     """把「固定口數的槓桿期貨部位」攤成一條可餵給回測器的淨值序列。
 
     空手期間持平；持有期間依 `1 + L × (F/F_entry − 1)` **線性**變動
     （固定口數，不複利、不再平衡），並在進出場各扣一次單邊成本。
 
     成本按契約金額計算，所以扣在權益上的比例是 `L × 單邊成本率`。
+
+    Args:
+        step_gain: **step-down**（docs/strategy.md §22）。部位權益相對進場
+            達 `1 + step_gain` 倍時（以期貨連續序列判定、當日期貨收盤成交），
+            把口數減到 `step_leverage` 倍，之後不再加回。`None` 表示關閉。
+            每筆最多觸發一次；出場日不觸發。
     """
     nav = [1.0] * len(dates)
     detail: list[FuturesTrade] = []
@@ -181,7 +204,9 @@ def vehicle_series(dates: list[date], continuous: list[float],
 
     equity = 1.0
     active: FuturesEntry | None = None
-    eq_at_entry = eq_after_cost = f0 = 0.0
+    eq_at_entry = anchor = f0 = lev = 0.0
+    stepped = False
+    step_d: date | None = None
 
     for i in range(len(dates)):
         if active is None:
@@ -191,34 +216,44 @@ def vehicle_series(dates: list[date], continuous: list[float],
                 continue
             active = e
             eq_at_entry = equity
-            eq_after_cost = equity * (1.0 - e.leverage * cost.one_way_rate(index_close[i]))
+            lev = e.leverage
+            anchor = equity * (1.0 - lev * cost.one_way_rate(index_close[i]))
             f0 = continuous[i]
-            nav[i] = eq_after_cost
+            stepped, step_d = False, None
+            nav[i] = anchor
             continue
 
-        v = eq_after_cost * (1.0 + active.leverage * (continuous[i] / f0 - 1.0))
+        v = anchor * (1.0 + lev * (continuous[i] / f0 - 1.0))
         closing = active.exit_i is not None and i == active.exit_i
         if closing:
-            v *= (1.0 - active.leverage * cost.one_way_rate(index_close[i]))
+            v *= (1.0 - lev * cost.one_way_rate(index_close[i]))
+        elif (step_gain is not None and not stepped
+                and v >= eq_at_entry * (1.0 + step_gain) and lev > step_leverage):
+            v = _step_down(v, lev, anchor, f0, continuous[i],
+                           cost.one_way_rate(index_close[i]), step_leverage)
+            anchor, f0, lev = v, continuous[i], step_leverage
+            stepped, step_d = True, dates[i]
         nav[i] = v
         if closing:
             detail.append(FuturesTrade(
                 entry_date=dates[active.entry_i], exit_date=dates[i],
-                entry_index=active.entry_index, entry_futures=f0,
+                entry_index=active.entry_index, entry_futures=continuous[active.entry_i],
                 exit_futures=continuous[i], leverage=active.leverage,
                 stop_distance=active.stop_distance,
-                futures_return=continuous[i] / f0 - 1.0,
-                ret=v / eq_at_entry - 1.0))
+                futures_return=continuous[i] / continuous[active.entry_i] - 1.0,
+                ret=v / eq_at_entry - 1.0,
+                final_leverage=lev, step_date=step_d))
             equity, active = v, None
 
     if active is not None:      # 持有到最後一根，未平倉
         detail.append(FuturesTrade(
             entry_date=dates[active.entry_i], exit_date=None,
-            entry_index=active.entry_index, entry_futures=f0,
+            entry_index=active.entry_index, entry_futures=continuous[active.entry_i],
             exit_futures=continuous[-1], leverage=active.leverage,
             stop_distance=active.stop_distance,
-            futures_return=continuous[-1] / f0 - 1.0,
-            ret=nav[-1] / eq_at_entry - 1.0))
+            futures_return=continuous[-1] / continuous[active.entry_i] - 1.0,
+            ret=nav[-1] / eq_at_entry - 1.0,
+            final_leverage=lev, step_date=step_d))
     return nav, detail
 
 
@@ -348,10 +383,46 @@ def fixed_leverage(entries: list["FuturesEntry"], leverage: float) -> list["Futu
                          e.stop_distance, e.trade) for e in entries]
 
 
+def hybrid_entries(entries: list["FuturesEntry"], bars, ma_period: int = 200,
+                   below_leverage: float = 3.0, above_risk_scale: float = 0.5,
+                   above_cap: float | None = None) -> list["FuturesEntry"]:
+    """§20 混合注碼：按進場日與均線的相對位置切換槓桿規則。
+
+        進場日收盤 < MA → 固定 `below_leverage`（深回檔是最好的機會，別壓小注）
+        其餘           → 風險式槓桿 × `above_risk_scale`（反環境訊號只給一半預算），
+                         可再以 `above_cap` 封頂
+
+    均線資料不足的日子歸「其餘」—— 沒有濾網資訊時維持風險式，是保守的選擇。
+    輸入的 `entries` 應來自 `entries_from_trades()`，其 `leverage` 即風險式槓桿。
+    """
+    from .engine import moving_average
+    ma = moving_average(bars, ma_period)
+    out = []
+    for e in entries:
+        m = ma[e.entry_i]
+        if m is not None and bars[e.entry_i].close < m:
+            lev = below_leverage
+        else:
+            lev = e.leverage * above_risk_scale
+            if above_cap is not None:
+                lev = min(lev, above_cap)
+        out.append(FuturesEntry(e.entry_i, e.exit_i, lev, e.entry_index,
+                                e.stop_distance, e.trade))
+    return out
+
+
+def entry_regime(bars, i: int, ma: list) -> str:
+    """進場日 i 適用哪一種注碼：'below'（固定 3x）或 'above'（半預算風險式）。"""
+    m = ma[i]
+    return "below" if (m is not None and bars[i].close < m) else "above"
+
+
 def core_overlay(dates: list[date], continuous: list[float],
                  entries: list["FuturesEntry"], cost: FuturesCost,
                  index_close: list[float], core_leverage: float,
-                 ma: list[float | None]) -> tuple[list[float], list[FuturesTrade], float]:
+                 ma: list[float | None],
+                 step_gain: float | None = None,
+                 step_leverage: float = 1.0) -> tuple[list[float], list[FuturesTrade], float]:
     """在 `vehicle_series` 之上，空手期間補一個低槓桿的核心部位。
 
     核心只在**策略沒有部位**且**收盤高於均線**時持有，策略一有訊號就先平掉核心。
@@ -367,25 +438,34 @@ def core_overlay(dates: list[date], continuous: list[float],
     by_entry = {e.entry_i: e for e in entries}
     nav = [1.0] * len(dates)
     detail: list[FuturesTrade] = []
-    equity, active, eq_at_entry, eq_after_cost, f0 = 1.0, None, 0.0, 0.0, 0.0
+    equity, active, eq_at_entry, anchor, f0, lev = 1.0, None, 0.0, 0.0, 0.0, 0.0
     holding_core, exposed = False, 0
+    stepped, step_d = False, None
 
     for i in range(len(dates)):
         if active is not None:
-            v = eq_after_cost * (1.0 + active.leverage * (continuous[i] / f0 - 1.0))
+            v = anchor * (1.0 + lev * (continuous[i] / f0 - 1.0))
             exposed += 1
             closing = active.exit_i is not None and i == active.exit_i
             if closing:
-                v *= 1.0 - active.leverage * cost.one_way_rate(index_close[i])
+                v *= 1.0 - lev * cost.one_way_rate(index_close[i])
+            elif (step_gain is not None and not stepped
+                    and v >= eq_at_entry * (1.0 + step_gain) and lev > step_leverage):
+                v = _step_down(v, lev, anchor, f0, continuous[i],
+                               cost.one_way_rate(index_close[i]), step_leverage)
+                anchor, f0, lev = v, continuous[i], step_leverage
+                stepped, step_d = True, dates[i]
             nav[i] = v
             if closing:
+                f_entry = continuous[active.entry_i]
                 detail.append(FuturesTrade(
                     entry_date=dates[active.entry_i], exit_date=dates[i],
-                    entry_index=active.entry_index, entry_futures=f0,
+                    entry_index=active.entry_index, entry_futures=f_entry,
                     exit_futures=continuous[i], leverage=active.leverage,
                     stop_distance=active.stop_distance,
-                    futures_return=continuous[i] / f0 - 1.0,
-                    ret=v / eq_at_entry - 1.0))
+                    futures_return=continuous[i] / f_entry - 1.0,
+                    ret=v / eq_at_entry - 1.0,
+                    final_leverage=lev, step_date=step_d))
                 equity, active, holding_core = v, None, False
             continue
 
@@ -398,10 +478,11 @@ def core_overlay(dates: list[date], continuous: list[float],
             if holding_core:
                 equity *= 1.0 - core_leverage * cost.one_way_rate(index_close[i])
                 holding_core = False
-            active, eq_at_entry = e, equity
-            eq_after_cost = equity * (1.0 - e.leverage * cost.one_way_rate(index_close[i]))
+            active, eq_at_entry, lev = e, equity, e.leverage
+            anchor = equity * (1.0 - lev * cost.one_way_rate(index_close[i]))
             f0 = continuous[i]
-            nav[i] = eq_after_cost
+            stepped, step_d = False, None
+            nav[i] = anchor
             exposed += 1
             continue
 
@@ -411,11 +492,13 @@ def core_overlay(dates: list[date], continuous: list[float],
         nav[i] = equity
 
     if active is not None:
+        f_entry = continuous[active.entry_i]
         detail.append(FuturesTrade(
             entry_date=dates[active.entry_i], exit_date=None,
-            entry_index=active.entry_index, entry_futures=f0,
+            entry_index=active.entry_index, entry_futures=f_entry,
             exit_futures=continuous[-1], leverage=active.leverage,
             stop_distance=active.stop_distance,
-            futures_return=continuous[-1] / f0 - 1.0,
-            ret=nav[-1] / eq_at_entry - 1.0))
+            futures_return=continuous[-1] / f_entry - 1.0,
+            ret=nav[-1] / eq_at_entry - 1.0,
+            final_leverage=lev, step_date=step_d))
     return nav, detail, exposed / len(dates)

@@ -342,3 +342,89 @@ class TestCoreOverlay(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHybridEntriesAndStepDown(unittest.TestCase):
+    """§20 混合注碼與 §22 step-down（最終套件）。"""
+
+    def _bars(self, closes):
+        from tw_backdraw.bars import Bar
+        return [Bar(d=date(2020, 1, 1) + timedelta(days=i), open=c, high=c,
+                    low=c, close=c) for i, c in enumerate(closes)]
+
+    def test_below_average_gets_fixed_leverage_above_gets_half_budget(self):
+        from tw_backdraw.futures import hybrid_entries
+        bars = self._bars([100.0] * 5 + [90.0, 110.0])   # MA3 後：第 5 根低於、第 6 根高於
+        ents = [FuturesEntry(5, 6, 4.0, 90.0, 0.02), FuturesEntry(6, 7, 4.0, 110.0, 0.02)]
+        out = hybrid_entries(ents, bars, ma_period=3, below_leverage=3.0,
+                             above_risk_scale=0.5)
+        self.assertEqual([e.leverage for e in out], [3.0, 2.0])
+        self.assertEqual([e.entry_i for e in out], [5, 6])           # 不丟訊號
+
+    def test_undefined_average_is_treated_as_above(self):
+        """均線暖身期沒有濾網資訊 → 保守地維持風險式（砍半），不給 3x。"""
+        from tw_backdraw.futures import hybrid_entries
+        bars = self._bars([100.0] * 3)
+        out = hybrid_entries([FuturesEntry(0, 2, 4.0, 100.0, 0.02)], bars, ma_period=3)
+        self.assertEqual(out[0].leverage, 2.0)
+
+    def test_above_cap_only_lowers(self):
+        from tw_backdraw.futures import hybrid_entries
+        bars = self._bars([100.0] * 5 + [110.0])
+        out = hybrid_entries([FuturesEntry(5, 6, 4.0, 110.0, 0.02)], bars, 3,
+                             above_risk_scale=0.5, above_cap=1.5)
+        self.assertEqual(out[0].leverage, 1.5)
+
+    def test_step_down_triggers_at_the_gain_and_reanchors_at_one_x(self):
+        """3x 部位：期貨 +50% → 權益 +150% → 當天降到 1x，之後權益只隨期貨 1:1 變動。"""
+        from tw_backdraw.futures import vehicle_series
+        ds = days(4)
+        fut = [100.0, 150.0, 165.0, 165.0]
+        ent = [FuturesEntry(0, 3, 3.0, 100.0, 0.05)]
+        nav, det = vehicle_series(ds, fut, ent, FREE, [100.0] * 4,
+                                  step_gain=1.5, step_leverage=1.0)
+        self.assertAlmostEqual(nav[1], 2.5, places=9)                # 觸發日：+150%
+        self.assertAlmostEqual(nav[2], 2.5 * (1 + 1.0 * 0.10), places=9)  # 之後 1x
+        self.assertEqual(det[0].step_date, ds[1])
+        self.assertEqual(det[0].final_leverage, 1.0)
+        self.assertEqual(det[0].leverage, 3.0)                       # 進場槓桿保留
+
+    def test_step_down_is_off_by_default_and_never_on_exit_day(self):
+        from tw_backdraw.futures import vehicle_series
+        ds = days(3)
+        fut = [100.0, 150.0, 160.0]
+        ent = [FuturesEntry(0, 2, 3.0, 100.0, 0.05)]
+        nav0, det0 = vehicle_series(ds, fut, ent, FREE, [100.0] * 3)
+        self.assertIsNone(det0[0].step_date)
+        self.assertAlmostEqual(nav0[2], 1 + 3 * 0.6, places=9)
+        # 出場日恰好達標：不減碼，照原槓桿結算
+        nav1, det1 = vehicle_series(ds, [100.0, 120.0, 150.0], ent, FREE, [100.0] * 3,
+                                    step_gain=1.5)
+        self.assertIsNone(det1[0].step_date)
+        self.assertAlmostEqual(det1[0].ret, 1.5, places=9)
+
+    def test_step_down_pays_one_way_cost_on_the_closed_notional(self):
+        """減碼平掉的名目要付一次單邊成本，其餘部位不付。"""
+        from tw_backdraw.futures import vehicle_series
+        cost = FuturesCost(tax_rate=0.001, commission_per_lot=0.0)
+        ds = days(3)
+        # 觸發門檻以「進場前權益」計，含進場成本時期貨 +50% 還差一點，用 +51%
+        fut = [100.0, 151.0, 151.0]
+        ent = [FuturesEntry(0, 2, 3.0, 100.0, 0.05)]
+        nav, _ = vehicle_series(ds, fut, ent, cost, [100.0] * 3, step_gain=1.5)
+        anchor = 1 - 3 * 0.001                       # 進場成本
+        v = anchor * (1 + 3 * 0.51)                  # 觸發日權益（未扣減碼成本）
+        closed = 3 * anchor * 1.51 - 1.0 * v         # 平掉的名目：原名目 − 目標名目
+        self.assertAlmostEqual(nav[1], v - closed * 0.001, places=12)
+
+    def test_core_overlay_applies_the_same_step_down(self):
+        from tw_backdraw.futures import core_overlay, vehicle_series
+        ds = days(5)
+        fut = [100.0, 150.0, 165.0, 165.0, 170.0]
+        ent = [FuturesEntry(0, 3, 3.0, 100.0, 0.05)]
+        ma = [None] * 5                              # 核心永不啟動 → 與 vehicle_series 相同
+        nav_c, det_c, _ = core_overlay(ds, fut, ent, FREE, [100.0] * 5, 0.5, ma,
+                                       step_gain=1.5)
+        nav_v, det_v = vehicle_series(ds, fut, ent, FREE, [100.0] * 5, step_gain=1.5)
+        self.assertEqual(nav_c, nav_v)
+        self.assertEqual(det_c[0].step_date, det_v[0].step_date)

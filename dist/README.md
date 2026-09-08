@@ -1,6 +1,36 @@
-# 單檔可執行的回測腳本
+# 單檔可執行的腳本
 
-`tx_futures_backtest.py` —— 台指期版，不需 clone repo。
+## 每日訊號：`tx_daily_signal.py` ＋ `daily-signal.yml`
+
+在**任何 GitHub 帳號**設定每晚自動推送「明日作戰表」到 Discord，不需 clone 本 repo：
+
+1. 新建一個 repo，把 `tx_daily_signal.py` 放在根目錄、`daily-signal.yml` 放到 `.github/workflows/`。
+2. Settings → Secrets and variables → Actions 新增 `FINLAB_API_TOKEN` 與 `DISCORD_WEBHOOK_URL`。
+3. Actions 頁面手動 Run workflow（勾 dry_run 先看 log），之後每週日～四 20:00 台北時間（12:00 UTC）自動執行。
+   若 log 出現「資料只到前一個交易日」，代表 FinLab 尚未更新，把 yml 的 cron 往後調一小時。
+
+本機測試：
+
+```bash
+pip install finlab pandas tzdata
+export Finlab_API_token=你的token
+python3 tx_daily_signal.py --dry-run --full                    # 完整版印在終端
+python3 tx_daily_signal.py --dry-run --as-of 2024-05-15 --full # 回放減碼日
+python3 tx_daily_signal.py notify --webhook URL --title 標題 --text 內文   # 失敗通知（只用標準函式庫）
+```
+
+參數與 repo 的 `scripts/discord_daily.py` 完全相同（`--full`、`--only-if-action`、`--as-of`、
+`--note`、`--sizing risk --no-step-down` 切回舊版注碼）。注碼規則與決策樹見
+[docs/final_package.md](../docs/final_package.md)。
+
+策略程式碼、每日訊息程式、332 筆換倉價差全部逐字嵌入，新的換倉日會自動向期交所補抓；
+已驗證在乾淨目錄執行的輸出與 repo 版逐字相同。由 `scripts/make_daily_script.py` 產生，
+改了程式請重新產生。
+
+## 回測：`tx_futures_backtest.py`
+
+台指期版回測，不需 clone repo。
+Colab 上執行請改用 [`notebooks/tx_futures_finlab.ipynb`](../notebooks/tx_futures_finlab.ipynb)（同一份程式碼與資料，結果一致）。
 
 ```bash
 pip install finlab pandas

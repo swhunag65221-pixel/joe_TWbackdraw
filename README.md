@@ -161,7 +161,15 @@ Colab 執行的完整回測，由上而下跑完即可，只需要 FinLab API to
 內容涵蓋：取資料 → 跑策略 → `sim()` → `report.display()` → 逐筆對齊驗證 →
 與買進持有對照 → 目前部位現況 → 參數敏感度。
 
-改了 `tw_backdraw/` 之後用 `python3 scripts/make_notebook.py` 重新產生。
+台指期版是 [`notebooks/tx_futures_finlab.ipynb`](notebooks/tx_futures_finlab.ipynb)：
+同樣不需 clone repo，策略程式碼與 332 筆歷史換倉價差都已嵌入（新的換倉日會
+自動向期交所補抓），內容涵蓋：取資料（含換倉價差還原）→ 跑策略 → 逐筆明細 →
+`sim()` → `report.display()` → 與買進持有對照 → 停損假設 vs 實際。
+已驗證與 `scripts/futures_trades.py` 的結果**完全一致**（逐日淨值浮點相等、
+逐筆交易與明細輸出逐字相同）。
+
+改了 `tw_backdraw/` 之後用 `python3 scripts/make_notebook.py`（ETF 版）與
+`python3 scripts/make_futures_notebook.py`（台指期版）重新產生。
 
 ### 用 FinLab `sim()` 產生互動報表
 
@@ -274,8 +282,14 @@ scripts/
   train_test_best.py 切一個時點，訓練段選參數、測試段驗收
   fetch_taifex_rolls.py 期交所分月合約收盤價（算換倉價差用）
   make_futures_script.py 單檔可執行的台指期回測腳本產生器
-notebooks/         Colab 用的 .ipynb
-dist/              單檔可執行的腳本（tx_futures_backtest.py）
+  hybrid_study.py  混合注碼：均線下固定 3x、均線上半預算風險式（docs/strategy.md §20）
+  walk_forward_sizing.py 注碼規則層的逐筆錨定 walk-forward（§21）
+  lab_mdd/         多代理 MDD 研究：回吐／核心／分散／最終套件（§22，報告在 docs/lab_mdd/）
+  make_futures_notebook.py 台指期 Colab notebook 產生器（嵌入原始碼＋換倉價差）
+  make_daily_script.py 每日訊號單檔產生器（可放到任何 GitHub 帳號的 Action）
+notebooks/         Colab 用的 .ipynb（tw50_2x_finlab／tx_futures_finlab）
+dist/              單檔可執行的腳本（tx_daily_signal.py 每日訊號＋daily-signal.yml、tx_futures_backtest.py 回測）
+docs/final_package.md 每日訊息採用的注碼規則（混合注碼＋核心＋step-down）：完整說明與決策樹
 docs/strategy.md   完整策略說明
 docs/futures_trades_2014_2026.md  台指期逐筆交易明細（2014–2026）
 docs/etf_trades_2018_2026.md      UPRO / TQQQ 逐筆交易明細（2018–2026）

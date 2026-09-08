@@ -1,12 +1,16 @@
 name: 明日作戰表 → Discord
 
-# 前一晚執行。所有觸發點位都由當天已收盤的資料決定，明天不會變動，
-# 所以不必卡在 13:30–13:45 那 15 分鐘裡才算 —— 排程延遲幾分鐘也無所謂。
-# 12:00 UTC = 20:00 台北。本 repo 的排程已停用（改由另一個帳號的 dist/daily-signal.yml 執行），
-# 保留 workflow_dispatch 供手動回放。
+# 前一晚執行（12:00 UTC = 20:00 台北）。若 log 顯示「資料只到前一個交易日」，
+# 代表 FinLab 尚未更新當日收盤，把 cron 往後調（例如 "0 13 * * 0-4" = 21:00 台北）。
+# 所有觸發點位由當天已收盤的資料決定，明天不會變動，排程延遲幾分鐘也無所謂。
+#
+# 設定：Settings → Secrets and variables → Actions 新增
+#   FINLAB_API_TOKEN     FinLab API token
+#   DISCORD_WEBHOOK_URL  Discord webhook
+# 把 tx_daily_signal.py 放在 repo 根目錄，本檔放到 .github/workflows/。
 on:
-  #schedule:
-  #  - cron: "0 12 * * 0-4"      # 週日至週四晚間 → 產出隔一個交易日的作戰表
+  schedule:
+    - cron: "0 12 * * 0-4"      # 週日至週四晚間 → 產出隔一個交易日的作戰表
   workflow_dispatch:
     inputs:
       as_of:
@@ -42,13 +46,10 @@ jobs:
           [ -z "$HOOK" ]  && missing="$missing DISCORD_WEBHOOK_URL"
           if [ -n "$missing" ]; then
             echo "::error::缺少 repository secret:$missing"
-            echo "到 Settings → Secrets and variables → Actions 新增後再執行。" >&2
             exit 1
           fi
           echo "secrets 齊全"
 
-      # 不要加 cache: pip —— 這個 repo 沒有 requirements.txt / pyproject.toml，
-      # setup-python 找不到可雜湊的相依檔會讓步驟直接失敗（不只是警告）。
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -60,7 +61,7 @@ jobs:
           Finlab_API_token: ${{ secrets.FINLAB_API_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python3 scripts/discord_daily.py \
+          python3 tx_daily_signal.py \
             ${{ inputs.as_of && format('--as-of {0}', inputs.as_of) || '' }} \
             ${{ inputs.full && '--full' || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}
@@ -74,7 +75,7 @@ jobs:
             echo "沒有 webhook，略過通知"
             exit 0
           fi
-          python3 scripts/discord_notify.py \
+          python3 tx_daily_signal.py notify \
             --webhook "$HOOK" --color red \
             --title "⚠️ 明日作戰表產生失敗" \
             --text "今晚沒有作戰表。[查看 log]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
