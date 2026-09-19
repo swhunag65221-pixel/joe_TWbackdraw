@@ -284,6 +284,7 @@ scripts/
   make_futures_script.py 單檔可執行的台指期回測腳本產生器
   hybrid_study.py  混合注碼：均線下固定 3x、均線上半預算風險式（docs/strategy.md §20）
   walk_forward_sizing.py 注碼規則層的逐筆錨定 walk-forward（§21）
+  underwater_study.py 最長水下期間能不能縮短（§24：四類槓桿全數未通過）
   lab_mdd/         多代理 MDD 研究：回吐／核心／分散／最終套件（§22，報告在 docs/lab_mdd/）
   make_futures_notebook.py 台指期 Colab notebook 產生器（嵌入原始碼＋換倉價差）
   make_daily_script.py 每日訊號單檔產生器（可放到任何 GitHub 帳號的 Action）
