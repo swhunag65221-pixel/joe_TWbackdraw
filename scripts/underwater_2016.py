@@ -14,6 +14,11 @@
 ⚠️ 2016–2026 幾乎全是多頭，台指期腿在此視窗的 Calmar 膨脹約 ×2.7（§22），
 且它排除了 2012–2015 的空轉年 —— 視窗內的「最長水下」本身就遠短於全期。
 所有數字只能同視窗互比，不可與 §24 的全期數字對照。
+
+⚠️⚠️ **截斷假高點**（§27 的更正）：在截斷視窗裡量水下，等於把視窗第一天
+當成新高。以 2016-01 起算時，2016-03-18 會被當成高點，但它其實比全期高點
+（2012-03-02）低 4.7% —— 由此量出的「2.2 年水下」是假的。
+第【5】節的視窗起點敏感度就是用來擋這個錯：**任何結論都必須在多個起點下成立**。
 """
 
 from __future__ import annotations
@@ -164,6 +169,21 @@ def main() -> int:
         cf = f'{Lf:.1f}年 {mf["cagr"]:>6.1%} {mf["sharpe"]:.2f}/{mf["calmar"]:.2f}'
         cg = f'{Lg:.1f}年 {mg["cagr"]:>6.1%} {mg["sharpe"]:.2f}/{mg["calmar"]:.2f}'
         print(f'{n:<30}{cf:<30}{cg:<30}{verdict}')
+
+    # ---- 截斷假高點的防呆：同一組方案換幾個視窗起點再量一次 ----
+    print("\n【5】視窗起點敏感度（擋截斷假高點；任何結論都要在多個起點下成立）\n")
+    starts = (date(2016, 1, 1), date(2016, 7, 1), date(2017, 1, 1), date(2018, 1, 1))
+    print(f'{"方案":<30}' + "".join(f'{str(s):>20}' for s in starts))
+    for n, r in cands:
+        cells = []
+        for s in starts:
+            idx = [j for j, d in enumerate(D) if d >= s]
+            ds, rs = D[idx[0]:], r[idx[0]:]
+            m = metrics(rs, ds)
+            cells.append(f'{underwater(ds, rs)[0]:.1f}年 / {m["calmar"]:.2f}')
+        print(f'{n:<30}' + "".join(f'{c:>20}' for c in cells))
+    print("\n  2016-01 起算會把 2016-03-18 當成高點，但它比全期高點（2012-03-02）"
+          "低 4.7% —— 該欄的水下長度不可信，以其餘欄位為準。")
     return 0
 
 
